@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.6.5
+// @version      0.7.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,7 +11,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.6.5";
+  const SCRIPT_VERSION = "0.7.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -54,6 +54,10 @@
   const logHistory = [];
   const LOG_HISTORY_MAX = 200;
   const LOG_PANEL_MAX = 25;
+  // Keeps the video paused while undecided so audio never leaks behind
+  // the "判定中" overlay. YouTube re-plays on SPA updates, hence interval.
+  let pauseTimer = 0;
+  let wasPlaying = false;
 
   // Stay resident on list pages (/, /results, /feed, ...) so SPA navigation
   // from a list to /watch can still be detected. Target filtering happens
@@ -128,6 +132,7 @@
       activeVideoKey = "";
       // Cancel any in-flight classification for the previous video.
       runToken++;
+      stopPlaybackGuard(false);
       hideOverlay();
       return;
     }
@@ -135,6 +140,8 @@
     const videoKey = getVideoKey(location.href);
     // Same-video events (progress, comments, pushState bursts) are silent.
     if (!videoKey || videoKey === activeVideoKey) return;
+    // A previous video's guard must not leak into the new video.
+    stopPlaybackGuard(false);
     dbg(`evaluate videoKey=${videoKey}`);
     const currentToken = ++runToken;
     activeVideoKey = videoKey;
@@ -142,16 +149,17 @@
     lastResult = null;
 
     const overrideKey = `${OVERRIDE_PREFIX}${videoKey}`;
-    dbg("checking override");
     const overrideValue = storageGet(overrideKey);
-    dbg(`override=${overrideValue}`);
     if (overrideValue === "1") {
       dbg("allow-listed override, skip");
       hideOverlay();
       return;
     }
 
+    // Pause first, ask later: undecided video never plays behind the overlay.
+    startPlaybackGuard();
     showOverlay("Jevで判定中…");
+    const cacheStartedAt = Date.now();
     const cached = readCachedResult(videoKey);
     if (cached) {
       dbg(`cache hit category=${cached.result.category} confidence=${cached.result.confidence}`);
@@ -162,22 +170,29 @@
     }
     dbg("cache miss, reading metadata");
 
+    const metaStartedAt = Date.now();
     const metadata = await readVideoMetadata(videoKey);
     if (currentToken !== runToken) return;
 
     if (!metadata) {
       dbg("metadata not found within timeout, allow");
+      stopPlaybackGuard(true);
       showResultStatus("Jev判定: 動画情報を取得できなかったため許可");
       return;
     }
-    dbg(`metadata ok titleLen=${metadata.title.length} channel=${metadata.channel}`);
+    dbg(
+      `metadata ok titleLen=${metadata.title.length} channel=${metadata.channel} (${Date.now() - metaStartedAt}ms)`,
+    );
 
     try {
       dbg(`POST ${CONFIG.endpoint}`);
+      const classifyStartedAt = Date.now();
       const result = await classify(metadata);
       if (currentToken !== runToken) return;
 
-      dbg(`result category=${result.category} confidence=${result.confidence}`);
+      dbg(
+        `result category=${result.category} confidence=${result.confidence} (${Date.now() - classifyStartedAt}ms, total ${Date.now() - cacheStartedAt}ms)`,
+      );
       const resultMetadata = {
         videoKey,
         url: metadata.url,
@@ -192,7 +207,50 @@
       // A classifier outage must not prevent normal browsing.
       console.warn("[Jev YouTube Guard] classification failed", error);
       dbg(`classify failed: ${error instanceof Error ? error.message : error}`);
+      stopPlaybackGuard(true);
       showResultStatus("Jev判定: 通信失敗のため許可");
+    }
+  }
+
+  function mainVideo() {
+    return (
+      document.querySelector("video.html5-main-video") ||
+      document.querySelector("video.video-stream") ||
+      document.querySelector("video")
+    );
+  }
+
+  function pauseAllVideos() {
+    const videos = document.querySelectorAll("video");
+    for (const video of videos) {
+      try {
+        if (!video.paused) video.pause();
+      } catch {
+        // A video that refuses to pause must not break the guard.
+      }
+    }
+  }
+
+  function startPlaybackGuard() {
+    const first = mainVideo();
+    wasPlaying = Boolean(first && !first.paused);
+    pauseAllVideos();
+    window.clearInterval(pauseTimer);
+    pauseTimer = window.setInterval(pauseAllVideos, 400);
+  }
+
+  function stopPlaybackGuard(resume) {
+    window.clearInterval(pauseTimer);
+    pauseTimer = 0;
+    if (!resume || !wasPlaying) return;
+    wasPlaying = false;
+    try {
+      const result = mainVideo()?.play();
+      // play() returns a promise in modern browsers; autoplay policy
+      // rejections must not surface as unhandled errors.
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch {
+      // Resume is best-effort only.
     }
   }
 
@@ -201,6 +259,8 @@
     lastMetadata = metadata ?? lastMetadata;
     lastResult = result ?? lastResult;
     if (shouldBlock(result)) {
+      // Guard stays on: the video remains paused behind the block screen.
+      pauseAllVideos();
       showOverlay("エンタメ判定のためブロックしました", () => {
         storageSet(overrideKey, "1");
         void reportOverride({
@@ -209,6 +269,7 @@
           title: metadata?.title || "",
           channel: metadata?.channel || "",
         });
+        stopPlaybackGuard(true);
         hideOverlay();
       });
     } else {
@@ -221,6 +282,7 @@
       const confidence = Number.isFinite(result?.confidence)
         ? ` ${Math.round(result.confidence * 100)}%`
         : "";
+      stopPlaybackGuard(true);
       showResultStatus(`Jev判定: ${category}${confidence}・許可`);
     }
   }
@@ -292,7 +354,14 @@
     const deadline = Date.now() + 10_000;
     let attempts = 0;
     let htmlFallback = null;
-    let htmlFetched = false;
+    // Race DOM against same-origin HTML from the start: on m.youtube.com the
+    // DOM path usually loses, so waiting 3s before fetching just adds latency.
+    void fetchHtmlMetadata(videoKey).then((result) => {
+      htmlFallback = result;
+      if (result)
+        dbg(`html fetch ready: title=${result.title.length}ch channel=${result.channel.length}ch`);
+      else dbg("html fetch empty");
+    });
     while (Date.now() < deadline) {
       attempts++;
       const player = getPlayerDetails();
@@ -356,21 +425,10 @@
           clientVersion: SCRIPT_VERSION,
         };
       }
-      // Same-origin HTML is the last resort on m.youtube.com where neither
-      // desktop selectors nor ytInitialPlayerResponse exist. Kick it off once
-      // after ~3s of DOM misses so the fast path stays fast.
-      if (!htmlFetched && attempts === 12) {
-        htmlFetched = true;
-        dbg("trying html fetch fallback");
-        htmlFallback = await fetchHtmlMetadata(videoKey);
-        dbg(
-          `html fetch: title=${htmlFallback?.title?.length ?? 0}ch channel=${htmlFallback?.channel?.length ?? 0}ch`,
-        );
-      }
       // One line per ~2s so the panel stays readable.
       if (attempts === 1 || attempts % 8 === 0) {
         dbg(
-          `waiting metadata (${attempts}): title=${title.length}ch channel=${channel.length}ch player=${player.found ? "y" : "n"}`,
+          `waiting metadata (${attempts}): title=${title.length}ch channel=${channel.length}ch player=${player.found ? "y" : "n"} html=${htmlFallback ? "y" : "n"}`,
         );
       }
       await delay(250);
