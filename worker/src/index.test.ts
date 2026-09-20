@@ -214,6 +214,13 @@ describe("Userscript policy", () => {
     expect(policy.shouldBlock({ category: "entertainment", confidence: 0.59 })).toBe(false);
     expect(policy.shouldBlock({ category: "study", confidence: 0.99 })).toBe(false);
   });
+
+  it("enables debug mode via query, hash, or localStorage flag", () => {
+    expect(policy.isDebugEnabled("https://www.youtube.com/watch?v=abc&jevdebug=1")).toBe(true);
+    expect(policy.isDebugEnabled("https://www.youtube.com/watch?v=abc#jevdebug")).toBe(true);
+    expect(policy.isDebugEnabled("https://www.youtube.com/watch?v=abc")).toBe(false);
+    expect(policy.isDebugEnabled("not a url")).toBe(false);
+  });
 });
 
 function jevSuccessResponse() {
@@ -369,6 +376,19 @@ describe("Classification logging on /classify", () => {
     expect(response.status).toBe(400);
     expect(run).toHaveBeenCalledTimes(1);
     expect(statements[0]?.params).toEqual(expect.arrayContaining([400]));
+  });
+
+  it("writes an unauthorized log when the token is wrong", async () => {
+    const { db, run, statements } = createMockDb();
+    const response = await worker.fetch(classifyRequest(video, "Bearer wrong"), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(401);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["Unauthorized", 401]));
   });
 
   it("still classifies when no log store is configured", async () => {

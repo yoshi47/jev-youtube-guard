@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.1.3
+// @version      0.2.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,7 +14,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.1.3";
+  const SCRIPT_VERSION = "0.2.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     clientToken: "YOUR_CLIENT_TOKEN",
@@ -26,9 +26,12 @@
   const RESULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const CLASSIFICATION_TIMEOUT_MS = 10_000;
   const OVERLAY_ID = "jev-youtube-guard-overlay";
+  const DEBUG_PANEL_ID = "jev-youtube-guard-debug";
+  const DEBUG_FLAG_KEY = "jev-youtube-guard:debug";
   const policy = {
     isTargetPage,
     shouldBlock,
+    isDebugEnabled,
   };
 
   globalThis.JevYouTubeGuardPolicy = policy;
@@ -38,12 +41,15 @@
   let activeVideoKey = "";
   let runToken = 0;
   let statusTimer = 0;
+  let debugMode = isDebugEnabled(location.href);
 
   void initialize();
 
   async function initialize() {
     await waitForDocumentElement();
     installOverlay();
+    if (debugMode) installDebugPanel();
+    dbg(`init url=${location.href}`);
     await evaluateCurrentVideo();
 
     document.addEventListener("yt-navigate-finish", () => {
@@ -58,19 +64,25 @@
   }
 
   async function evaluateCurrentVideo() {
+    debugMode = isDebugEnabled(location.href);
+    if (debugMode) installDebugPanel();
+    dbg(`evaluate url=${location.href}`);
     if (!isTargetPage(location.href)) {
       activeVideoKey = "";
       hideOverlay();
+      dbg("not a target page, skip");
       return;
     }
 
     const currentToken = ++runToken;
     const videoKey = getVideoKey(location.href);
+    dbg(`videoKey=${videoKey || "(empty)"}`);
     if (!videoKey || videoKey === activeVideoKey) return;
     activeVideoKey = videoKey;
 
     const overrideKey = `${OVERRIDE_PREFIX}${videoKey}`;
     if (localStorage.getItem(overrideKey) === "1") {
+      dbg("allow-listed override, skip");
       hideOverlay();
       return;
     }
@@ -78,32 +90,40 @@
     showOverlay("Jevで判定中…");
     const cachedResult = readCachedResult(videoKey);
     if (cachedResult) {
+      dbg(`cache hit category=${cachedResult.category} confidence=${cachedResult.confidence}`);
       applyResult(cachedResult, overrideKey);
       return;
     }
+    dbg("cache miss, reading metadata");
 
     const metadata = await readVideoMetadata(videoKey);
     if (currentToken !== runToken) return;
 
     if (!metadata) {
+      dbg("metadata not found within timeout, allow");
       showResultStatus("Jev判定: 動画情報を取得できなかったため許可");
       return;
     }
+    dbg(`metadata ok titleLen=${metadata.title.length} channel=${metadata.channel}`);
 
     try {
+      dbg(`POST ${CONFIG.endpoint}`);
       const result = await classify(metadata);
       if (currentToken !== runToken) return;
 
+      dbg(`result category=${result.category} confidence=${result.confidence}`);
       writeCachedResult(videoKey, result);
       applyResult(result, overrideKey);
     } catch (error) {
       // A classifier outage must not prevent normal browsing.
       console.warn("[Jev YouTube Guard] classification failed", error);
+      dbg(`classify failed: ${error instanceof Error ? error.message : error}`);
       showResultStatus("Jev判定: 通信失敗のため許可");
     }
   }
 
   function applyResult(result, overrideKey) {
+    dbg(`decision=${shouldBlock(result) ? "BLOCK" : "ALLOW"}`);
     if (shouldBlock(result)) {
       showOverlay("エンタメ判定のためブロックしました", () => {
         localStorage.setItem(overrideKey, "1");
@@ -160,11 +180,12 @@
     while (Date.now() < deadline) {
       const title =
         findText(["h1.ytd-watch-metadata yt-formatted-string", "h1 yt-formatted-string"]) ||
+        metaContent('meta[name="title"]') ||
         document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
-      const channel = findText([
-        "ytd-watch-metadata ytd-channel-name a",
-        "#owner ytd-channel-name a",
-      ]);
+      const channel =
+        findText(["ytd-watch-metadata ytd-channel-name a", "#owner ytd-channel-name a"]) ||
+        metaContent('[itemprop="author"] [itemprop="name"]') ||
+        metaContent('[itemprop="author"]');
 
       if (title && channel) {
         return {
@@ -273,6 +294,59 @@
       if (text) return text;
     }
     return "";
+  }
+
+  function metaContent(selector) {
+    return document.querySelector(selector)?.getAttribute("content")?.trim() || "";
+  }
+
+  function isDebugEnabled(urlString) {
+    try {
+      if (localStorage.getItem(DEBUG_FLAG_KEY) === "1") return true;
+    } catch {
+      // A restricted localStorage must not break the guard.
+    }
+    try {
+      const url = new URL(urlString);
+      return url.searchParams.has("jevdebug") || url.hash.includes("jevdebug");
+    } catch {
+      return false;
+    }
+  }
+
+  function dbg(message) {
+    if (!debugMode) return;
+    console.warn("[Jev YouTube Guard][debug]", message);
+    const panel = document.getElementById(DEBUG_PANEL_ID);
+    if (!panel) return;
+    const line = document.createElement("div");
+    line.textContent = `${new Date().toISOString().slice(11, 19)} ${message}`;
+    panel.appendChild(line);
+    while (panel.children.length > 40) panel.firstChild?.remove();
+  }
+
+  function installDebugPanel() {
+    if (document.getElementById(DEBUG_PANEL_ID)) return;
+    const panel = document.createElement("div");
+    panel.id = DEBUG_PANEL_ID;
+    panel.style.cssText = [
+      "position: fixed",
+      "left: 8px",
+      "bottom: 8px",
+      "z-index: 2147483647",
+      "max-width: 92vw",
+      "max-height: 40vh",
+      "overflow-y: auto",
+      "background: rgba(0, 0, 0, 0.85)",
+      "color: #0f0",
+      "font: 11px monospace",
+      "white-space: pre-wrap",
+      "word-break: break-all",
+      "padding: 8px",
+      "border-radius: 8px",
+      "pointer-events: none",
+    ].join(";");
+    document.documentElement.appendChild(panel);
   }
 
   function waitForDocumentElement() {

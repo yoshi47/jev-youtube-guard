@@ -64,6 +64,18 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 
 クエリは `limit`(既定50/最大200)、`offset`、`category=study|entertainment|other`、`videoKey=<動画ID>`、`q=<title/channel/urlの部分一致>` が使えます。例: `.../logs?category=entertainment&limit=20`。
 
+## デバッグ
+
+動かないときの切り分け手順です。
+
+1. まず `/logs` を見る: 行があればリクエストは届いている(401行=トークン不一致、400行=動画情報のパース失敗、502行=Jev側エラー)。1行もなければiPhoneからリクエストが飛んでいない
+2. Userscriptを `0.2.0` 以降に更新し、動画URLの末尾に `&jevdebug=1` を付けて開く(例: `https://www.youtube.com/watch?v=xxx&jevdebug=1`)
+3. 画面左下の緑のデバッグパネルに出る行で止まっている箇所を特定する:
+   - `init` 自体が出ない → 拡張機能がそのページで動いていない(@match外、無効化、アクセス未許可)
+   - `metadata not found` → タイトル/チャンネル名が取れていない(常に許可になる)
+   - `classify failed` → Workerへの通信失敗(401ならトークン不一致)
+   - `decision=ALLOW` → 判定は動いているがブロック条件(`entertainment` かつ信頼度0.6以上)に当たっていない
+
 ## セキュリティ上の注意
 
 `CLIENT_TOKEN` はUserscriptから読めるため、完全な秘密ではありません。個人用の入口を絞るためのトークンです。TypeSafeのAPIキーは必ずWorker Secretに置き、GitやUserscriptへ書き込まないでください。

@@ -196,6 +196,19 @@ export default {
     }
 
     if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
+      await flushLog(
+        logFailure(env, {
+          videoKey: "",
+          url: "",
+          title: "",
+          channel: "",
+          descriptionPrefix: "",
+          clientVersion: "",
+          error: "Unauthorized",
+          httpStatus: 401,
+        }),
+        ctx,
+      );
       return json({ error: "Unauthorized" }, 401);
     }
 
