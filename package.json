@@ -1,0 +1,26 @@
+{
+  "name": "jev-youtube-guard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint worker",
+    "format": "oxfmt worker userscripts *.json *.jsonc",
+    "format:check": "oxfmt --check worker userscripts *.json *.jsonc",
+    "build": "wrangler deploy --dry-run",
+    "deploy": "pnpm build && wrangler deploy",
+    "dev": "wrangler dev",
+    "secret:typesafe": "wrangler secret put TYPESAFE_API_KEY",
+    "secret:client-token": "wrangler secret put CLIENT_TOKEN"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260823.1",
+    "oxfmt": "latest",
+    "oxlint": "latest",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5",
+    "wrangler": "^4.125.0"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jev-youtube-guard",
+  "compatibility_date": "2026-09-20",
+  "main": "worker/src/index.ts",
+  "observability": { "enabled": true },
+}
