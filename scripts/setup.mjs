@@ -26,7 +26,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WRANGLER_JSONC = resolve(ROOT, "wrangler.jsonc");
 const USERSCRIPT = resolve(ROOT, "userscripts", "jev-youtube-guard.user.js");
 const DB_NAME = "jev-youtube-guard-logs";
-const TOKEN_PLACEHOLDER = "YOUR_CLIENT_TOKEN";
+const CLIENT_TOKEN_PLACEHOLDER = "YOUR_CLIENT_TOKEN";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UUID_FIND_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const WORKER_URL_RE = /https:\/\/[^\s"'`]+\.workers\.dev/;
@@ -143,10 +143,17 @@ function readUserscriptToken() {
   const text = readFileSync(USERSCRIPT, "utf-8");
   const match = text.match(/clientToken:\s*"([^"]*)"/);
   const token = match?.[1] ?? "";
-  if (token && token !== TOKEN_PLACEHOLDER && !token.includes("YOUR-") && token.length >= 16) {
-    return token;
-  }
-  return "";
+  if (isPlaceholderToken(token)) return "";
+  return token.length >= 16 ? token : "";
+}
+
+function isPlaceholderToken(token) {
+  return (
+    token === "" ||
+    token === CLIENT_TOKEN_PLACEHOLDER ||
+    token.includes("YOUR_") ||
+    token.includes("YOUR-")
+  );
 }
 
 function patchUserscript(baseUrl, clientToken) {
@@ -157,16 +164,16 @@ function patchUserscript(baseUrl, clientToken) {
     [/feedbackEndpoint:\s*"[^"]*"/, `feedbackEndpoint: "${baseUrl}/feedback"`],
     [/clientToken:\s*"[^"]*"/, `clientToken: "${clientToken}"`],
   ];
-  let next = text;
+  let updated = text;
   for (const [pattern, update] of updates) {
-    if (!pattern.test(next)) {
+    if (!pattern.test(updated)) {
       fail(
         `userscript の書き換えに失敗しました (${pattern})。ファイル構成が変わっている可能性があります。`,
       );
     }
-    next = next.replace(pattern, update);
+    updated = updated.replace(pattern, update);
   }
-  writeFileSync(USERSCRIPT, next);
+  writeFileSync(USERSCRIPT, updated);
 }
 
 async function prompt(question, defaultValue = "") {

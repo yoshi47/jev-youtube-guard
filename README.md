@@ -66,10 +66,10 @@ pnpm deploy
 デプロイ後、`userscripts/jev-youtube-guard.user.js` の次の4項目を更新します。
 
 ```js
-endpoint: "https://<worker-name>.<subdomain>.workers.dev/classify",
-allowEndpoint: "https://<worker-name>.<subdomain>.workers.dev/allow",
-feedbackEndpoint: "https://<worker-name>.<subdomain>.workers.dev/feedback",
-clientToken: "<CLIENT_TOKENと同じ値>",
+endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
+allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
+feedbackEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/feedback",
+clientToken: "YOUR_CLIENT_TOKEN",
 ```
 
 `TYPESAFE_API_KEY` にはTypeSafeのAPIキー、`CLIENT_TOKEN` にはUserscriptとWorkerで共有する個人用トークンを入力します。JevのAPIキーはUserscriptに書きません。
@@ -97,7 +97,7 @@ pnpm build
 
 ```sh
 curl -H "Authorization: Bearer $CLIENT_TOKEN" \
-  "https://<worker-name>.<subdomain>.workers.dev/logs?limit=50" | jq .
+  "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/logs?limit=50" | jq .
 ```
 
 クエリは `limit`(既定50/最大200)、`offset`、`category=study|entertainment|other`、`videoKey=<動画ID>`、`policyVersion=<ポリシーバージョン>`、`q=<title/channel/urlの部分一致>` が使えます。例: `.../logs?category=entertainment&limit=20`。
@@ -110,7 +110,7 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 
 ```sh
 curl -H "Authorization: Bearer $CLIENT_TOKEN" \
-  "https://<worker-name>.<subdomain>.workers.dev/overrides?limit=50" | jq .
+  "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/overrides?limit=50" | jq .
 ```
 
 ## 誤判定フィードバック
@@ -119,7 +119,7 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 
 ```sh
 curl -H "Authorization: Bearer $CLIENT_TOKEN" \
-  "https://<worker-name>.<subdomain>.workers.dev/feedback?limit=50" | jq .
+  "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/feedback?limit=50" | jq .
 ```
 
 なおマイグレーション番号は `0005` です(`0004` はローカル実験のチャンネルブロック用に予約ずみ)。
