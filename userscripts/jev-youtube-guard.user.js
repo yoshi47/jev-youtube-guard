@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.2.0
+// @version      0.2.1
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,7 +14,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.2.0";
+  const SCRIPT_VERSION = "0.2.1";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     clientToken: "YOUR_CLIENT_TOKEN",
@@ -36,12 +36,14 @@
 
   globalThis.JevYouTubeGuardPolicy = policy;
 
-  if (typeof document === "undefined" || !isTargetPage(location.href)) return;
-
   let activeVideoKey = "";
   let runToken = 0;
   let statusTimer = 0;
-  let debugMode = isDebugEnabled(location.href);
+  let debugMode = false;
+
+  if (typeof document === "undefined" || !isTargetPage(location.href)) return;
+
+  debugMode = isDebugEnabled(location.href);
 
   void initialize();
 
@@ -81,7 +83,7 @@
     activeVideoKey = videoKey;
 
     const overrideKey = `${OVERRIDE_PREFIX}${videoKey}`;
-    if (localStorage.getItem(overrideKey) === "1") {
+    if (storageGet(overrideKey) === "1") {
       dbg("allow-listed override, skip");
       hideOverlay();
       return;
@@ -126,7 +128,7 @@
     dbg(`decision=${shouldBlock(result) ? "BLOCK" : "ALLOW"}`);
     if (shouldBlock(result)) {
       showOverlay("エンタメ判定のためブロックしました", () => {
-        localStorage.setItem(overrideKey, "1");
+        storageSet(overrideKey, "1");
         hideOverlay();
       });
     } else {
@@ -151,11 +153,11 @@
 
   function readCachedResult(videoKey) {
     try {
-      const raw = localStorage.getItem(`${RESULT_PREFIX}${videoKey}`);
+      const raw = storageGet(`${RESULT_PREFIX}${videoKey}`);
       if (!raw) return null;
       const cached = JSON.parse(raw);
       if (Date.now() - cached.createdAt > RESULT_TTL_MS) {
-        localStorage.removeItem(`${RESULT_PREFIX}${videoKey}`);
+        storageRemove(`${RESULT_PREFIX}${videoKey}`);
         return null;
       }
       return cached.result;
@@ -165,13 +167,31 @@
   }
 
   function writeCachedResult(videoKey, result) {
+    storageSet(`${RESULT_PREFIX}${videoKey}`, JSON.stringify({ createdAt: Date.now(), result }));
+  }
+
+  function storageGet(key) {
     try {
-      localStorage.setItem(
-        `${RESULT_PREFIX}${videoKey}`,
-        JSON.stringify({ createdAt: Date.now(), result }),
-      );
+      return localStorage.getItem(key);
+    } catch {
+      dbg("localStorage is unavailable, continuing without cache");
+      return null;
+    }
+  }
+
+  function storageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
     } catch {
       // A full or restricted localStorage must not block the video.
+    }
+  }
+
+  function storageRemove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // A restricted localStorage must not block the video.
     }
   }
 
@@ -301,11 +321,7 @@
   }
 
   function isDebugEnabled(urlString) {
-    try {
-      if (localStorage.getItem(DEBUG_FLAG_KEY) === "1") return true;
-    } catch {
-      // A restricted localStorage must not break the guard.
-    }
+    if (storageGet(DEBUG_FLAG_KEY) === "1") return true;
     try {
       const url = new URL(urlString);
       return url.searchParams.has("jevdebug") || url.hash.includes("jevdebug");

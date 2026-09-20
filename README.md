@@ -72,6 +72,7 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 2. Userscriptを `0.2.0` 以降に更新し、動画URLの末尾に `&jevdebug=1` を付けて開く(例: `https://www.youtube.com/watch?v=xxx&jevdebug=1`)
 3. 画面左下の緑のデバッグパネルに出る行で止まっている箇所を特定する:
    - `init` 自体が出ない → 拡張機能がそのページで動いていない(@match外、無効化、アクセス未許可)
+   - `videoKey=` の次で止まる → 0.2.0以前のバグ(localStorage例外で死ぬ)。0.2.1以降に更新する
    - `metadata not found` → タイトル/チャンネル名が取れていない(常に許可になる)
    - `classify failed` → Workerへの通信失敗(401ならトークン不一致)
    - `decision=ALLOW` → 判定は動いているがブロック条件(`entertainment` かつ信頼度0.6以上)に当たっていない
