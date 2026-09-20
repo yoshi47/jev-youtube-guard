@@ -621,3 +621,143 @@ describe("GET /overrides", () => {
     });
   });
 });
+
+function feedbackRequest(body: unknown, token = "Bearer client") {
+  return new Request("https://guard.example/feedback", {
+    method: "POST",
+    headers: { Authorization: token, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+describe("POST /feedback", () => {
+  it("rejects a request without the client token and logs it", async () => {
+    const { db, run, statements } = createMockDb();
+    const response = await worker.fetch(feedbackRequest({ videoKey: "abc" }, "Bearer wrong"), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(401);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["Unauthorized", 401]));
+  });
+
+  it("returns 503 when no log store is configured", async () => {
+    const response = await worker.fetch(feedbackRequest({ videoKey: "abc" }), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+    });
+
+    expect(response.status).toBe(503);
+  });
+
+  it("rejects feedback without videoKey or url", async () => {
+    const { db, run } = createMockDb();
+    const response = await worker.fetch(feedbackRequest({ title: "only" }), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(400);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("writes a false-negative feedback row with the Jev judgment", async () => {
+    const { db, run, statements } = createMockDb();
+    const response = await worker.fetch(
+      feedbackRequest({
+        videoKey: "abc",
+        url: "https://www.youtube.com/watch?v=abc",
+        title: "title",
+        channel: "channel",
+        clientVersion: "0.5.0",
+        category: "study",
+        confidence: 0.72,
+        kind: "false-negative",
+        note: "",
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.sql).toContain("INSERT INTO feedback_logs");
+    expect(statements[0]?.params).toEqual(
+      expect.arrayContaining(["abc", "title", "channel", "0.5.0", "study", 0.72, "false-negative"]),
+    );
+  });
+
+  it("defaults an unknown kind to false-negative", async () => {
+    const { db, run, statements } = createMockDb();
+    const response = await worker.fetch(feedbackRequest({ videoKey: "abc", kind: "bogus" }), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["false-negative"]));
+  });
+});
+
+describe("GET /feedback", () => {
+  it("rejects a request without the client token", async () => {
+    const { db } = createMockDb();
+    const response = await worker.fetch(new Request("https://guard.example/feedback"), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(401);
+  });
+
+  it("returns 503 when no log store is configured", async () => {
+    const response = await worker.fetch(
+      new Request("https://guard.example/feedback", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+    );
+
+    expect(response.status).toBe(503);
+  });
+
+  it("returns feedbacks with total, limit, and offset", async () => {
+    const row = {
+      id: 3,
+      created_at: "2026-09-21T00:00:00.000Z",
+      video_key: "abc",
+      url: "https://www.youtube.com/watch?v=abc",
+      title: "title",
+      channel: "channel",
+      client_version: "0.5.0",
+      category: "study",
+      confidence: 0.72,
+      kind: "false-negative",
+      note: "",
+    };
+    const { db } = createMockDb({ total: 1 }, { results: [row] });
+    const response = await worker.fetch(
+      new Request("https://guard.example/feedback?limit=10&videoKey=abc", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      total: 1,
+      limit: 10,
+      offset: 0,
+      feedbacks: [
+        expect.objectContaining({ videoKey: "abc", kind: "false-negative", category: "study" }),
+      ],
+    });
+  });
+});

@@ -82,6 +82,20 @@ export interface OverrideLogEntry {
   clientVersion: string;
 }
 
+export type FeedbackKind = "false-negative" | "false-positive";
+
+export interface FeedbackLogEntry {
+  videoKey: string;
+  url: string;
+  title: string;
+  channel: string;
+  clientVersion: string;
+  category: string;
+  confidence: number | null;
+  kind: FeedbackKind;
+  note: string;
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -215,6 +229,29 @@ export async function writeOverrideLog(db: D1Database, entry: OverrideLogEntry):
     .run();
 }
 
+export async function writeFeedbackLog(db: D1Database, entry: FeedbackLogEntry): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO feedback_logs
+        (created_at, video_key, url, title, channel, client_version,
+         category, confidence, kind, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      new Date().toISOString(),
+      entry.videoKey,
+      entry.url,
+      entry.title,
+      entry.channel,
+      entry.clientVersion,
+      entry.category,
+      entry.confidence,
+      entry.kind,
+      entry.note,
+    )
+    .run();
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -236,6 +273,17 @@ export default {
         return unauthorized(env, ctx);
       }
       return handleAllow(request, env, ctx);
+    }
+
+    if (request.method === "POST" && url.pathname === "/feedback") {
+      if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
+        return unauthorized(env, ctx);
+      }
+      return handleFeedback(request, env, ctx);
+    }
+
+    if (request.method === "GET" && url.pathname === "/feedback") {
+      return handleGetFeedback(request, env);
     }
 
     if (request.method !== "POST" || url.pathname !== "/classify") {
@@ -501,6 +549,123 @@ async function handleGetOverrides(request: Request, env: Env): Promise<Response>
   }
 }
 
+async function handleFeedback(
+  request: Request,
+  env: Env,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  if (!env.DB) {
+    return json({ error: "Log store is not configured" }, 503);
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid request JSON" }, 400);
+  }
+
+  if (!isRecord(body)) {
+    return json({ error: "Invalid request body" }, 400);
+  }
+
+  const videoKey = stringField(body, "videoKey");
+  const url = stringField(body, "url");
+  const title = stringField(body, "title");
+  const channel = stringField(body, "channel");
+  const clientVersion = stringField(body, "clientVersion");
+  const category = stringField(body, "category");
+  const note = stringField(body, "note");
+  const kind = parseFeedbackKind(stringField(body, "kind"));
+  const confidence = parseConfidence(body["confidence"]);
+
+  if (!videoKey && !url) {
+    return json({ error: "Invalid feedback payload" }, 400);
+  }
+
+  // Log-only: never auto-blocks. Triage happens by reading GET /feedback.
+  await flushLog(
+    (async () => {
+      try {
+        await writeFeedbackLog(env.DB as D1Database, {
+          videoKey: videoKey || getVideoKey(url),
+          url,
+          title,
+          channel,
+          clientVersion,
+          category,
+          confidence,
+          kind,
+          note,
+        });
+      } catch (error) {
+        console.error("jev_log_write_error", {
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    })(),
+    ctx,
+  );
+  return json({ ok: true }, 200);
+}
+
+async function handleGetFeedback(request: Request, env: Env): Promise<Response> {
+  if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+
+  if (!env.DB) {
+    return json({ error: "Log store is not configured" }, 503);
+  }
+
+  const url = new URL(request.url);
+  const limit = clampInt(url.searchParams.get("limit"), DEFAULT_LOGS_LIMIT, 1, MAX_LOGS_LIMIT);
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const search = buildSearchFilter(
+    url.searchParams.get("videoKey") ?? "",
+    url.searchParams.get("q") ?? "",
+  );
+  const where = search.conditions.length > 0 ? `WHERE ${search.conditions.join(" AND ")}` : "";
+
+  try {
+    const countRow = (await env.DB.prepare(`SELECT COUNT(*) AS total FROM feedback_logs ${where}`)
+      .bind(...search.bindings)
+      .first<{ total: number }>()) ?? { total: 0 };
+    const rows = await env.DB.prepare(
+      `SELECT id, created_at, video_key, url, title, channel, client_version,
+              category, confidence, kind, note
+         FROM feedback_logs ${where}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?`,
+    )
+      .bind(...search.bindings, limit, offset)
+      .all<FeedbackLogRow>();
+
+    return json(
+      {
+        feedbacks: (rows.results ?? []).map(toFeedbackApiEntry),
+        total: countRow.total ?? 0,
+        limit,
+        offset,
+      },
+      200,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("jev_logs_error", { error: message });
+    return json({ error: "Failed to read logs" }, 500);
+  }
+}
+
+function parseFeedbackKind(value: string): FeedbackKind {
+  return value === "false-positive" ? "false-positive" : "false-negative";
+}
+
+function parseConfidence(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
+}
+
 function buildSearchFilter(
   videoKey: string,
   query: string,
@@ -538,6 +703,36 @@ function toOverrideApiEntry(row: OverrideLogRow): Record<string, unknown> {
     title: row.title,
     channel: row.channel,
     clientVersion: row.client_version,
+  };
+}
+
+interface FeedbackLogRow {
+  id: number;
+  created_at: string;
+  video_key: string;
+  url: string;
+  title: string;
+  channel: string;
+  client_version: string;
+  category: string;
+  confidence: number | null;
+  kind: string;
+  note: string;
+}
+
+function toFeedbackApiEntry(row: FeedbackLogRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    videoKey: row.video_key,
+    url: row.url,
+    title: row.title,
+    channel: row.channel,
+    clientVersion: row.client_version,
+    category: row.category,
+    confidence: row.confidence,
+    kind: row.kind,
+    note: row.note,
   };
 }
 

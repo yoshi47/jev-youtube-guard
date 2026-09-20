@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.4.0
+// @version      0.5.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,10 +14,11 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.4.0";
+  const SCRIPT_VERSION = "0.5.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
+    feedbackEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/feedback",
     clientToken: "YOUR_CLIENT_TOKEN",
     confidenceThreshold: 0.6,
   };
@@ -30,6 +31,7 @@
   // Must match the Worker's POLICY_VERSION. Bump together when criteria change.
   const POLICY_VERSION = "1";
   const DEBUG_PANEL_ID = "jev-youtube-guard-debug";
+  const FEEDBACK_BUTTON_ID = "jev-youtube-guard-feedback";
   const DEBUG_FLAG_KEY = "jev-youtube-guard:debug";
   // Temporary: force the debug panel on for every video until the issue is resolved.
   // Set back to false to restore opt-in (&jevdebug=1) behavior.
@@ -46,6 +48,9 @@
   let runToken = 0;
   let statusTimer = 0;
   let debugMode = false;
+  // Last classification for the false-negative feedback button (log-only).
+  let lastMetadata = null;
+  let lastResult = null;
 
   if (typeof document === "undefined" || !isTargetPage(location.href)) return;
 
@@ -100,6 +105,8 @@
     dbg(`videoKey=${videoKey || "(empty)"}`);
     if (!videoKey || videoKey === activeVideoKey) return;
     activeVideoKey = videoKey;
+    lastMetadata = null;
+    lastResult = null;
 
     const overrideKey = `${OVERRIDE_PREFIX}${videoKey}`;
     dbg("checking override");
@@ -115,6 +122,8 @@
     const cached = readCachedResult(videoKey);
     if (cached) {
       dbg(`cache hit category=${cached.result.category} confidence=${cached.result.confidence}`);
+      lastMetadata = cached.metadata;
+      lastResult = cached.result;
       applyResult(cached.result, overrideKey, cached.metadata);
       return;
     }
@@ -143,6 +152,8 @@
         channel: metadata.channel,
       };
       writeCachedResult(videoKey, result, resultMetadata);
+      lastMetadata = resultMetadata;
+      lastResult = result;
       applyResult(result, overrideKey, resultMetadata);
     } catch (error) {
       // A classifier outage must not prevent normal browsing.
@@ -154,6 +165,8 @@
 
   function applyResult(result, overrideKey, metadata) {
     dbg(`decision=${shouldBlock(result) ? "BLOCK" : "ALLOW"}`);
+    lastMetadata = metadata ?? lastMetadata;
+    lastResult = result ?? lastResult;
     if (shouldBlock(result)) {
       showOverlay("エンタメ判定のためブロックしました", () => {
         storageSet(overrideKey, "1");
@@ -312,6 +325,26 @@
     }
   }
 
+  async function reportFeedback(payload) {
+    try {
+      dbg(`POST ${CONFIG.feedbackEndpoint}`);
+      const response = await fetch(CONFIG.feedbackEndpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CONFIG.clientToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ...payload, clientVersion: SCRIPT_VERSION }),
+      });
+      if (!response.ok) throw new Error(`Worker request failed: ${response.status}`);
+      dbg("feedback reported");
+    } catch (error) {
+      // A failed feedback report must not prevent watching the video.
+      console.warn("[Jev YouTube Guard] feedback report failed", error);
+      dbg(`feedback report failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
   function installOverlay() {
     if (document.getElementById(OVERLAY_ID)) return;
     const overlay = document.createElement("div");
@@ -406,7 +439,12 @@
     const line = document.createElement("div");
     line.textContent = `${new Date().toISOString().slice(11, 19)} ${message}`;
     panel.appendChild(line);
-    while (panel.children.length > 40) panel.firstChild?.remove();
+    // Keep the feedback button pinned: only trim log lines.
+    while (panel.querySelectorAll(":scope > div").length > 40) {
+      const oldest = Array.from(panel.children).find((child) => child.id !== FEEDBACK_BUTTON_ID);
+      if (!oldest) break;
+      oldest.remove();
+    }
   }
 
   function installDebugPanel() {
@@ -430,6 +468,38 @@
       "border-radius: 8px",
       "pointer-events: none",
     ].join(";");
+    const feedbackButton = document.createElement("button");
+    feedbackButton.id = FEEDBACK_BUTTON_ID;
+    feedbackButton.type = "button";
+    feedbackButton.textContent = "この動画を誤判定として報告";
+    feedbackButton.style.cssText = [
+      "display: block",
+      "margin-bottom: 6px",
+      "padding: 6px 10px",
+      "border: 1px solid #0f0",
+      "border-radius: 6px",
+      "background: #002200",
+      "color: #0f0",
+      "font: 11px monospace",
+      "pointer-events: auto",
+    ].join(";");
+    feedbackButton.addEventListener("click", () => {
+      if (!lastMetadata) {
+        dbg("nothing to report yet");
+        return;
+      }
+      // Log-only feedback: the Worker records it but never auto-blocks.
+      void reportFeedback({
+        videoKey: lastMetadata.videoKey || getVideoKey(location.href),
+        url: lastMetadata.url || location.href,
+        title: lastMetadata.title || "",
+        channel: lastMetadata.channel || "",
+        category: lastResult?.category || "",
+        confidence: lastResult?.confidence,
+        kind: "false-negative",
+      });
+    });
+    panel.appendChild(feedbackButton);
     document.documentElement.appendChild(panel);
   }
 

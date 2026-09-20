@@ -37,11 +37,12 @@ pnpm deploy
 
 `TYPESAFE_API_KEY` にはTypeSafeのAPIキー、`CLIENT_TOKEN` にはUserscriptとWorkerで共有する個人用トークンを入力します。JevのAPIキーはUserscriptに書きません。
 
-デプロイ後、`userscripts/jev-youtube-guard.user.js` の次の3項目を更新します。
+デプロイ後、`userscripts/jev-youtube-guard.user.js` の次の4項目を更新します。
 
 ```js
 endpoint: "https://<worker-name>.<subdomain>.workers.dev/classify",
 allowEndpoint: "https://<worker-name>.<subdomain>.workers.dev/allow",
+feedbackEndpoint: "https://<worker-name>.<subdomain>.workers.dev/feedback",
 clientToken: "<CLIENT_TOKENと同じ値>",
 ```
 
@@ -75,6 +76,17 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 curl -H "Authorization: Bearer $CLIENT_TOKEN" \
   "https://<worker-name>.<subdomain>.workers.dev/overrides?limit=50" | jq .
 ```
+
+## 誤判定フィードバック
+
+許可した動画が「本当はエンタメだった」のような見逃しは、デバッグパネル上部の「この動画を誤判定として報告」ボタンから報告できます(Userscript 0.5.0以降)。Workerの `POST /feedback` が `feedback_logs` に記録するだけで、自動ブロックはしません。判定時の `category/confidence` も一緒に残るので、後から基準見直しの材料にできます。一覧は `GET /feedback`(`limit/offset/videoKey/q` 対応)で見られます。
+
+```sh
+curl -H "Authorization: Bearer $CLIENT_TOKEN" \
+  "https://<worker-name>.<subdomain>.workers.dev/feedback?limit=50" | jq .
+```
+
+なおマイグレーション番号は `0005` です(`0004` はローカル実験のチャンネルブロック用に予約ずみ)。
 
 ## デバッグ
 
