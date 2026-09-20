@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.7.0
+// @version      0.8.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,7 +11,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.7.0";
+  const SCRIPT_VERSION = "0.8.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -29,6 +29,7 @@
   const POLICY_VERSION = "1";
   const DEBUG_PANEL_ID = "jev-youtube-guard-debug";
   const FEEDBACK_BUTTON_ID = "jev-youtube-guard-feedback";
+  const FEEDBACK_FLOAT_ID = "jev-youtube-guard-feedback-float";
   const DEBUG_FLAG_KEY = "jev-youtube-guard:debug";
   // Temporary: force the debug panel on for every video until the issue is resolved.
   // Set back to false to restore opt-in (&jevdebug=1) behavior.
@@ -71,6 +72,7 @@
   async function initialize() {
     await waitForDocumentElement();
     installOverlay();
+    installFeedbackFloat();
     installGlobalErrorTrap();
     if (debugMode) installDebugPanel();
     dbg(`init url=${location.href}`);
@@ -134,6 +136,7 @@
       runToken++;
       stopPlaybackGuard(false);
       hideOverlay();
+      setFeedbackFloatVisible(false);
       return;
     }
 
@@ -143,6 +146,7 @@
     // A previous video's guard must not leak into the new video.
     stopPlaybackGuard(false);
     dbg(`evaluate videoKey=${videoKey}`);
+    setFeedbackFloatVisible(true);
     const currentToken = ++runToken;
     activeVideoKey = videoKey;
     lastMetadata = null;
@@ -560,10 +564,12 @@
       });
       if (!response.ok) throw new Error(`Worker request failed: ${response.status}`);
       dbg("feedback reported");
+      return true;
     } catch (error) {
       // A failed feedback report must not prevent watching the video.
       console.warn("[Jev YouTube Guard] feedback report failed", error);
       dbg(`feedback report failed: ${error instanceof Error ? error.message : error}`);
+      return false;
     }
   }
 
@@ -620,6 +626,17 @@
         "padding: 10px 14px; border: 1px solid #999; border-radius: 8px; background: #fff;";
       button.addEventListener("click", onAllow, { once: true });
       content.appendChild(button);
+
+      // Blocked but actually study: report without unblocking.
+      const reportButton = document.createElement("button");
+      reportButton.type = "button";
+      reportButton.textContent = "勉強用だったと報告";
+      reportButton.style.cssText =
+        "margin-left: 8px; padding: 10px 14px; border: 1px solid #999; border-radius: 8px; background: #fff;";
+      reportButton.addEventListener("click", () => {
+        void sendFeedback(reportButton);
+      });
+      content.appendChild(reportButton);
     }
     overlay.appendChild(content);
   }
@@ -770,26 +787,78 @@
       "pointer-events: auto",
     ].join(";");
     feedbackButton.addEventListener("click", () => {
-      if (!lastMetadata) {
-        dbg("nothing to report yet");
-        return;
-      }
-      // Log-only feedback: the Worker records it but never auto-blocks.
-      void reportFeedback({
-        videoKey: lastMetadata.videoKey || getVideoKey(location.href),
-        url: lastMetadata.url || location.href,
-        title: lastMetadata.title || "",
-        channel: lastMetadata.channel || "",
-        category: lastResult?.category || "",
-        confidence: lastResult?.confidence,
-        kind: "false-negative",
-      });
+      void sendFeedback(feedbackButton);
     });
     panel.appendChild(header);
     panel.appendChild(copyButton);
     panel.appendChild(feedbackButton);
     panel.appendChild(logBox);
     document.documentElement.appendChild(panel);
+  }
+
+  // Always-visible feedback entry point: works with the debug panel off.
+  // Placed above the player controls so it never blocks playback ops.
+  function installFeedbackFloat() {
+    if (document.getElementById(FEEDBACK_FLOAT_ID)) return;
+    const button = document.createElement("button");
+    button.id = FEEDBACK_FLOAT_ID;
+    button.type = "button";
+    button.textContent = "誤判定を報告";
+    button.hidden = true;
+    button.style.cssText = [
+      "position: fixed",
+      "right: 8px",
+      "bottom: 64px",
+      "z-index: 2147483647",
+      "padding: 8px 12px",
+      "border: 1px solid rgba(255,255,255,0.4)",
+      "border-radius: 20px",
+      "background: rgba(0, 0, 0, 0.6)",
+      "color: #fff",
+      "font: 12px -apple-system, BlinkMacSystemFont, sans-serif",
+      "pointer-events: auto",
+    ].join(";");
+    button.addEventListener("click", () => {
+      void sendFeedback(button);
+    });
+    document.documentElement.appendChild(button);
+    setFeedbackFloatVisible(isTargetPage(location.href));
+  }
+
+  function setFeedbackFloatVisible(visible) {
+    const button = document.getElementById(FEEDBACK_FLOAT_ID);
+    if (button) button.hidden = !visible;
+  }
+
+  // Shared reporter: kind is inferred from the last decision so one button
+  // covers both directions (blocked study -> false-positive,
+  // allowed entertainment -> false-negative). Log-only on the Worker.
+  async function sendFeedback(invokedButton) {
+    if (!lastMetadata) {
+      dbg("nothing to report yet");
+      flashButton(invokedButton, "判定待ち");
+      return;
+    }
+    const blocked = lastResult ? shouldBlock(lastResult) : false;
+    const ok = await reportFeedback({
+      videoKey: lastMetadata.videoKey || getVideoKey(location.href),
+      url: lastMetadata.url || location.href,
+      title: lastMetadata.title || "",
+      channel: lastMetadata.channel || "",
+      category: lastResult?.category || "",
+      confidence: lastResult?.confidence,
+      kind: blocked ? "false-positive" : "false-negative",
+    });
+    flashButton(invokedButton, ok ? "報告済み ✓" : "報告失敗");
+  }
+
+  function flashButton(button, text) {
+    if (!button || !button.isConnected) return;
+    const original = button.textContent;
+    button.textContent = text;
+    window.setTimeout(() => {
+      if (button.isConnected) button.textContent = original;
+    }, 2000);
   }
 
   function fallbackCopy(text, done) {
