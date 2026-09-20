@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.8.0
+// @version      0.8.1
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,7 +11,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.8.0";
+  const SCRIPT_VERSION = "0.8.1";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -612,31 +612,59 @@
 
     const content = document.createElement("div");
     content.style.cssText = blocked
-      ? "max-width: 420px; padding: 24px; border: 1px solid #bbb; border-radius: 12px; background: #fff; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);"
+      ? "width: 100%; max-width: 420px; box-sizing: border-box; padding: 24px; border: 1px solid #bbb; border-radius: 12px; background: #fff; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);"
       : "";
     const text = document.createElement("p");
     text.textContent = message;
+    text.style.cssText = blocked
+      ? "margin: 0; font-size: 16px; font-weight: 700; line-height: 1.6; color: #111;"
+      : "margin: 0;";
     content.appendChild(text);
 
     if (onAllow) {
+      const actions = document.createElement("div");
+      actions.style.cssText = "display: flex; flex-direction: column; gap: 8px; margin-top: 16px;";
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "この動画だけ表示する";
-      button.style.cssText =
-        "padding: 10px 14px; border: 1px solid #999; border-radius: 8px; background: #fff;";
+      button.style.cssText = [
+        "width: 100%",
+        "box-sizing: border-box",
+        "padding: 12px 16px",
+        "border: none",
+        "border-radius: 10px",
+        "background: #111",
+        "color: #fff",
+        "font-size: 15px",
+        "font-weight: 700",
+        "line-height: 1.4",
+        "cursor: pointer",
+      ].join(";");
       button.addEventListener("click", onAllow, { once: true });
-      content.appendChild(button);
+      actions.appendChild(button);
 
       // Blocked but actually study: report without unblocking.
       const reportButton = document.createElement("button");
       reportButton.type = "button";
       reportButton.textContent = "勉強用だったと報告";
-      reportButton.style.cssText =
-        "margin-left: 8px; padding: 10px 14px; border: 1px solid #999; border-radius: 8px; background: #fff;";
+      reportButton.style.cssText = [
+        "width: 100%",
+        "box-sizing: border-box",
+        "padding: 12px 16px",
+        "border: 1px solid #ddd",
+        "border-radius: 10px",
+        "background: #fff",
+        "color: #333",
+        "font-size: 14px",
+        "font-weight: 600",
+        "line-height: 1.4",
+        "cursor: pointer",
+      ].join(";");
       reportButton.addEventListener("click", () => {
         void sendFeedback(reportButton);
       });
-      content.appendChild(reportButton);
+      actions.appendChild(reportButton);
+      content.appendChild(actions);
     }
     overlay.appendChild(content);
   }
