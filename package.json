@@ -14,6 +14,7 @@
     "dev": "wrangler dev",
     "d1:migrate": "wrangler d1 migrations apply jev-youtube-guard-logs --local",
     "d1:migrate:remote": "wrangler d1 migrations apply jev-youtube-guard-logs --remote",
+    "secret:typesafe": "wrangler secret put TYPESAFE_API_KEY",
     "secret:client-token": "wrangler secret put CLIENT_TOKEN"
   },
   "devDependencies": {

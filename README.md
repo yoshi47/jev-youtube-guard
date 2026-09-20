@@ -7,7 +7,7 @@ iPhone SafariのUserscripts系拡張から、YouTubeの動画ページをTypeSaf
 ```text
 iPhone Safari Userscript
   -> Cloudflare Worker /classify
-  -> Workers AI typesafe/jev
+  -> TypeSafe Jev API
 ```
 
 対象は初期版では `youtube.com/watch` と `youtube.com/shorts` の動画ページだけです。
@@ -30,11 +30,12 @@ pnpm build
 
 ```sh
 wrangler login
+pnpm secret:typesafe
 pnpm secret:client-token
 pnpm deploy
 ```
 
-`CLIENT_TOKEN` にはUserscriptとWorkerで共有する個人用トークンを入力します。Jevの利用料($0.042 / M入力トークン)はWorkerを置いたCloudflareアカウントに課金され、別途のAPIキーは不要です。
+`TYPESAFE_API_KEY` にはTypeSafeのAPIキー、`CLIENT_TOKEN` にはUserscriptとWorkerで共有する個人用トークンを入力します。JevのAPIキーはUserscriptに書きません。
 
 デプロイ後、`userscripts/jev-youtube-guard.user.js` の次の4項目を更新します。
 
@@ -102,4 +103,4 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 
 ## セキュリティ上の注意
 
-`CLIENT_TOKEN` はUserscriptから読めるため、完全な秘密ではありません。個人用の入口を絞るためのトークンです。
+`CLIENT_TOKEN` はUserscriptから読めるため、完全な秘密ではありません。個人用の入口を絞るためのトークンです。TypeSafeのAPIキーは必ずWorker Secretに置き、GitやUserscriptへ書き込まないでください。

@@ -1,4 +1,4 @@
-export const JEV_MODEL = "typesafe/jev";
+const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const MAX_DESCRIPTION_LENGTH = 8_000;
 const LOG_DESCRIPTION_PREFIX_LENGTH = 500;
 const DEFAULT_LOGS_LIMIT = 50;
@@ -11,9 +11,9 @@ export const POLICY_VERSION = "1";
 export type Category = "study" | "entertainment" | "other";
 
 export interface Env {
+  TYPESAFE_API_KEY: string;
   CLIENT_TOKEN: string;
   DB?: D1Database;
-  AI: Ai;
 }
 
 export interface VideoMetadata {
@@ -35,7 +35,6 @@ export interface ClassificationResponse extends ClassificationResult {
 }
 
 export interface JevResponse {
-  model?: string;
   answers: {
     category: {
       choice: string;
@@ -43,14 +42,11 @@ export interface JevResponse {
       confidence: number;
     };
   };
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-  };
 }
 
 interface JevRequest {
-  state: VideoMetadata;
+  state: string;
+  model: "jev-latest";
   questions: {
     category: {
       type: "choice";
@@ -113,7 +109,8 @@ export function isAuthorized(authorization: string | undefined, clientToken: str
 
 export function buildJevRequest(video: VideoMetadata): JevRequest {
   return {
-    state: video,
+    state: JSON.stringify(video),
+    model: "jev-latest",
     questions: {
       category: {
         type: "choice",
@@ -145,21 +142,25 @@ export function normalizeJevResponse(response: JevResponse): ClassificationResul
   };
 }
 
-export async function classifyVideo(video: VideoMetadata, ai: Ai): Promise<ClassificationResult> {
-  let response: unknown;
-  try {
-    response = await ai.run(
-      JEV_MODEL,
-      buildJevRequest(video) as unknown as Record<string, unknown>,
-    );
-  } catch (error) {
-    throw new Error(
-      `Jev request failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-      { cause: error },
-    );
+export async function classifyVideo(
+  video: VideoMetadata,
+  apiKey: string,
+  fetcher: typeof fetch = fetch,
+): Promise<ClassificationResult> {
+  const response = await fetcher(JEV_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildJevRequest(video)),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Jev request failed: ${response.status}`);
   }
 
-  return normalizeJevResponse(response as JevResponse);
+  return normalizeJevResponse((await response.json()) as JevResponse);
 }
 
 export function getVideoKey(urlString: string): string {
@@ -344,7 +345,7 @@ async function handleClassify(
 
   const startedAt = Date.now();
   try {
-    const result = await classifyVideo(video, env.AI);
+    const result = await classifyVideo(video, env.TYPESAFE_API_KEY);
     const videoKey = getVideoKey(video.url);
     const response: ClassificationResponse = { ...result, policyVersion: POLICY_VERSION };
     console.warn("jev_classification", {
