@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.2.3
+// @version      0.2.4
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,7 +14,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.2.3";
+  const SCRIPT_VERSION = "0.2.4";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     clientToken: "YOUR_CLIENT_TOKEN",
@@ -290,7 +290,8 @@
     if (!overlay) return;
     window.clearTimeout(statusTimer);
     overlay.hidden = false;
-    overlay.innerHTML = "";
+    // YouTube enforces Trusted Types: innerHTML assignment throws, so clear via DOM APIs.
+    while (overlay.firstChild) overlay.removeChild(overlay.firstChild);
     const blocked = Boolean(onAllow);
     overlay.style.inset = blocked ? "0" : "12px 12px auto auto";
     overlay.style.padding = blocked ? "24px" : "8px 12px";
