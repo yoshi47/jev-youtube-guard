@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.6.4
+// @version      0.6.5
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,7 +11,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.6.4";
+  const SCRIPT_VERSION = "0.6.5";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -291,6 +291,8 @@
   async function readVideoMetadata(videoKey) {
     const deadline = Date.now() + 10_000;
     let attempts = 0;
+    let htmlFallback = null;
+    let htmlFetched = false;
     while (Date.now() < deadline) {
       attempts++;
       const player = getPlayerDetails();
@@ -304,8 +306,14 @@
           "#title h1",
           "h2.reel-player-header-title",
           ".yt-core-attributed-string",
+          // m.youtube.com (mobile) layouts
+          ".slim-video-information-title",
+          "#slim-video-information-title",
+          "ytm-video-title",
+          ".video-title",
         ]) ||
         player.title ||
+        htmlFallback?.title ||
         metaContent('meta[property="og:title"]') ||
         metaContent('meta[name="title"]') ||
         document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
@@ -319,14 +327,22 @@
           "ytd-channel-name a",
           "#channel-name a",
           "#owner a",
+          // m.youtube.com (mobile) layouts
+          ".slim-video-information-channel",
+          "#slim-video-information-channel",
+          "ytm-channel-name",
+          ".channel-name",
+          ".owner-channel-name",
         ]) ||
         findHandleText() ||
         player.author ||
+        htmlFallback?.channel ||
         metaContent('[itemprop="author"] [itemprop="name"]') ||
         metaContent('[itemprop="author"]');
 
       if (title && channel) {
-        if (player.fromPlayer && !findText(["h1 yt-formatted-string"])) {
+        if (htmlFallback && !player.fromPlayer) dbg(`metadata via html fetch (${attempts})`);
+        else if (player.fromPlayer && !findText(["h1 yt-formatted-string"])) {
           dbg(`metadata via player response (attempt ${attempts})`);
         }
         return {
@@ -340,6 +356,17 @@
           clientVersion: SCRIPT_VERSION,
         };
       }
+      // Same-origin HTML is the last resort on m.youtube.com where neither
+      // desktop selectors nor ytInitialPlayerResponse exist. Kick it off once
+      // after ~3s of DOM misses so the fast path stays fast.
+      if (!htmlFetched && attempts === 12) {
+        htmlFetched = true;
+        dbg("trying html fetch fallback");
+        htmlFallback = await fetchHtmlMetadata(videoKey);
+        dbg(
+          `html fetch: title=${htmlFallback?.title?.length ?? 0}ch channel=${htmlFallback?.channel?.length ?? 0}ch`,
+        );
+      }
       // One line per ~2s so the panel stays readable.
       if (attempts === 1 || attempts % 8 === 0) {
         dbg(
@@ -350,6 +377,50 @@
     }
     dbg("metadata timeout");
     return null;
+  }
+
+  // Same-origin fetch of the watch HTML. Server-rendered HTML carries the
+  // correct og:title / ownerChannelName even during SPA navigations where
+  // the live DOM and <head> meta are stale or mobile-structured.
+  async function fetchHtmlMetadata(videoKey) {
+    try {
+      const url = `${location.origin}/watch?v=${encodeURIComponent(videoKey)}`;
+      const response = await fetch(url, { credentials: "same-origin" });
+      if (!response.ok) return null;
+      const html = await response.text();
+      const titleRaw = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/)?.[1] ?? "";
+      const channelRaw =
+        html.match(/"ownerChannelName":"((?:[^"\\]|\\.)*)"/)?.[1] ??
+        html.match(/"author":"((?:[^"\\]|\\.)*)"/)?.[1] ??
+        html.match(/<meta[^>]+name="author"[^>]+content="([^"]+)"/)?.[1] ??
+        "";
+      const title = decodeHtml(unescapeJsonString(titleRaw)).trim();
+      const channel = unescapeJsonString(channelRaw).trim();
+      if (!title || !channel) return null;
+      return { title, channel };
+    } catch {
+      return null;
+    }
+  }
+
+  function unescapeJsonString(raw) {
+    if (!raw || !raw.includes("\\")) return raw;
+    try {
+      return JSON.parse(`"${raw}"`);
+    } catch {
+      return raw;
+    }
+  }
+
+  function decodeHtml(raw) {
+    if (!raw || !raw.includes("&")) return raw;
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.innerHTML = raw;
+      return textarea.value;
+    } catch {
+      return raw;
+    }
   }
 
   // window.ytInitialPlayerResponse is refreshed on SPA navigations while
