@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.2.1
+// @version      0.2.2
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,7 +14,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.2.1";
+  const SCRIPT_VERSION = "0.2.2";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     clientToken: "YOUR_CLIENT_TOKEN",
@@ -28,6 +28,9 @@
   const OVERLAY_ID = "jev-youtube-guard-overlay";
   const DEBUG_PANEL_ID = "jev-youtube-guard-debug";
   const DEBUG_FLAG_KEY = "jev-youtube-guard:debug";
+  // Temporary: force the debug panel on for every video until the issue is resolved.
+  // Set back to false to restore opt-in (&jevdebug=1) behavior.
+  const DEBUG_FORCE_ON = true;
   const policy = {
     isTargetPage,
     shouldBlock,
@@ -43,7 +46,7 @@
 
   if (typeof document === "undefined" || !isTargetPage(location.href)) return;
 
-  debugMode = isDebugEnabled(location.href);
+  debugMode = DEBUG_FORCE_ON || isDebugEnabled(location.href);
 
   void initialize();
 
@@ -66,7 +69,7 @@
   }
 
   async function evaluateCurrentVideo() {
-    debugMode = isDebugEnabled(location.href);
+    debugMode = DEBUG_FORCE_ON || isDebugEnabled(location.href);
     if (debugMode) installDebugPanel();
     dbg(`evaluate url=${location.href}`);
     if (!isTargetPage(location.href)) {

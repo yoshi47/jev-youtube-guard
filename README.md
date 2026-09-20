@@ -69,7 +69,7 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 動かないときの切り分け手順です。
 
 1. まず `/logs` を見る: 行があればリクエストは届いている(401行=トークン不一致、400行=動画情報のパース失敗、502行=Jev側エラー)。1行もなければiPhoneからリクエストが飛んでいない
-2. Userscriptを `0.2.0` 以降に更新し、動画URLの末尾に `&jevdebug=1` を付けて開く(例: `https://www.youtube.com/watch?v=xxx&jevdebug=1`)
+2. Userscriptを `0.2.2` 以降に更新すると、全動画で左下に緑のデバッグパネルが出ます(問題が解決したら `DEBUG_FORCE_ON` を `false` に戻すと `&jevdebug=1` 付きだけになります)
 3. 画面左下の緑のデバッグパネルに出る行で止まっている箇所を特定する:
    - `init` 自体が出ない → 拡張機能がそのページで動いていない(@match外、無効化、アクセス未許可)
    - `videoKey=` の次で止まる → 0.2.0以前のバグ(localStorage例外で死ぬ)。0.2.1以降に更新する
