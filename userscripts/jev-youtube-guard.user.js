@@ -33,7 +33,7 @@
   const DEBUG_FLAG_KEY = "jev-youtube-guard:debug";
   // Temporary: force the debug panel on for every video until the issue is resolved.
   // Set back to false to restore opt-in (&jevdebug=1) behavior.
-  const DEBUG_FORCE_ON = true;
+  const DEBUG_FORCE_ON = false;
   const policy = {
     isTargetPage,
     shouldBlock,
