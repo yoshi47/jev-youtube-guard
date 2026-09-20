@@ -63,7 +63,11 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
   "https://<worker-name>.<subdomain>.workers.dev/logs?limit=50" | jq .
 ```
 
-クエリは `limit`(既定50/最大200)、`offset`、`category=study|entertainment|other`、`videoKey=<動画ID>`、`q=<title/channel/urlの部分一致>` が使えます。例: `.../logs?category=entertainment&limit=20`。
+クエリは `limit`(既定50/最大200)、`offset`、`category=study|entertainment|other`、`videoKey=<動画ID>`、`policyVersion=<ポリシーバージョン>`、`q=<title/channel/urlの部分一致>` が使えます。例: `.../logs?category=entertainment&limit=20`。
+
+## 分類ポリシーのバージョン
+
+判定基準を変えるときは、Workerの `POLICY_VERSION` とUserscriptの `POLICY_VERSION` を一緒に上げ、Userscriptのバージョンも上げます(現在はどちらも `"1"`)。応答・D1・キャッシュがすべてこの値でキー付けされるので、基準変更前の判定と混ざりません。古いキャッシュは自動で再判定になります。
 
 「この動画だけ表示する」を押した解除操作は `POST /allow` で `override_logs` に記録されます。Userscript(0.3.0以降)が自動で送るので手動操作は不要です。一覧は `GET /overrides`(`limit/offset/videoKey/q` 対応)で見られます。
 

@@ -191,6 +191,7 @@ describe("Worker fetch handler", () => {
       await expect(response.json()).resolves.toMatchObject({
         category: "entertainment",
         confidence: 0.88,
+        policyVersion: "1",
       });
     } finally {
       fetcher.mockRestore();
@@ -307,11 +308,12 @@ describe("writeClassificationLog", () => {
       jevLatencyMs: 123,
       error: null,
       httpStatus: 200,
+      policyVersion: "1",
     });
 
     expect(run).toHaveBeenCalledTimes(1);
     expect(statements[0]?.sql).toContain("INSERT INTO classification_logs");
-    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study", 0.9, 200]));
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study", 0.9, 200, "1"]));
   });
 });
 
@@ -336,6 +338,7 @@ describe("Classification logging on /classify", () => {
           "entertainment",
           0.88,
           200,
+          "1",
         ]),
       );
     } finally {
@@ -358,8 +361,9 @@ describe("Classification logging on /classify", () => {
       expect(response.status).toBe(502);
       expect(run).toHaveBeenCalledTimes(1);
       expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", 502]));
-      const errorIndex = (statements[0]?.params.length ?? 0) - 2;
-      expect(statements[0]?.params[errorIndex]).toMatch(/Jev request failed/);
+      const params = statements[0]?.params ?? [];
+      // [..., jevLatencyMs, error, httpStatus, policyVersion]
+      expect(params[params.length - 3]).toMatch(/Jev request failed/);
     } finally {
       fetcher.mockRestore();
     }
@@ -460,6 +464,7 @@ describe("GET /logs", () => {
       jev_latency_ms: 100,
       error: null,
       http_status: 200,
+      policy_version: "1",
     };
     const { db } = createMockDb({ total: 1 }, { results: [row] });
     const response = await worker.fetch(
@@ -475,9 +480,28 @@ describe("GET /logs", () => {
       limit: 10,
       offset: 0,
       logs: [
-        expect.objectContaining({ videoKey: "abc", category: "entertainment", httpStatus: 200 }),
+        expect.objectContaining({
+          videoKey: "abc",
+          category: "entertainment",
+          httpStatus: 200,
+          policyVersion: "1",
+        }),
       ],
     });
+  });
+
+  it("filters logs by policy version", async () => {
+    const { db, statements } = createMockDb({ total: 0 }, { results: [] });
+    const response = await worker.fetch(
+      new Request("https://guard.example/logs?policyVersion=1", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+    );
+
+    expect(response.status).toBe(200);
+    expect(statements[0]?.sql).toContain("policy_version = ?");
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["1"]));
   });
 });
 

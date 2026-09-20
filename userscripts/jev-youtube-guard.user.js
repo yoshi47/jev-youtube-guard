@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.3.0
+// @version      0.4.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,7 +14,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.3.0";
+  const SCRIPT_VERSION = "0.4.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -27,6 +27,8 @@
   const RESULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const CLASSIFICATION_TIMEOUT_MS = 10_000;
   const OVERLAY_ID = "jev-youtube-guard-overlay";
+  // Must match the Worker's POLICY_VERSION. Bump together when criteria change.
+  const POLICY_VERSION = "1";
   const DEBUG_PANEL_ID = "jev-youtube-guard-debug";
   const DEBUG_FLAG_KEY = "jev-youtube-guard:debug";
   // Temporary: force the debug panel on for every video until the issue is resolved.
@@ -192,6 +194,11 @@
         storageRemove(`${RESULT_PREFIX}${videoKey}`);
         return null;
       }
+      if (cached.policyVersion !== POLICY_VERSION) {
+        dbg(`cache policy mismatch (cached=${cached.policyVersion}), re-classify`);
+        storageRemove(`${RESULT_PREFIX}${videoKey}`);
+        return null;
+      }
       return { result: cached.result, metadata: cached.metadata ?? null };
     } catch {
       return null;
@@ -201,7 +208,12 @@
   function writeCachedResult(videoKey, result, metadata) {
     storageSet(
       `${RESULT_PREFIX}${videoKey}`,
-      JSON.stringify({ createdAt: Date.now(), result, metadata: metadata ?? null }),
+      JSON.stringify({
+        createdAt: Date.now(),
+        policyVersion: POLICY_VERSION,
+        result,
+        metadata: metadata ?? null,
+      }),
     );
   }
 

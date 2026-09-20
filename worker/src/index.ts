@@ -4,6 +4,10 @@ const LOG_DESCRIPTION_PREFIX_LENGTH = 500;
 const DEFAULT_LOGS_LIMIT = 50;
 const MAX_LOGS_LIMIT = 200;
 
+// Bump this whenever the classification criteria change. Cached results and
+// log rows are keyed by it so old judgments stay distinguishable.
+export const POLICY_VERSION = "1";
+
 export type Category = "study" | "entertainment" | "other";
 
 export interface Env {
@@ -24,6 +28,10 @@ export interface ClassificationResult {
   category: Category;
   probabilities: Record<Category, number>;
   confidence: number;
+}
+
+export interface ClassificationResponse extends ClassificationResult {
+  policyVersion: string;
 }
 
 export interface JevResponse {
@@ -63,6 +71,7 @@ export interface ClassificationLogEntry {
   jevLatencyMs: number | null;
   error: string | null;
   httpStatus: number;
+  policyVersion: string;
 }
 
 export interface OverrideLogEntry {
@@ -164,8 +173,8 @@ export async function writeClassificationLog(
       `INSERT INTO classification_logs
         (created_at, video_key, url, title, channel, description_prefix, client_version,
          category, confidence, prob_study, prob_entertainment, prob_other,
-         jev_latency_ms, error, http_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         jev_latency_ms, error, http_status, policy_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       new Date().toISOString(),
@@ -183,6 +192,7 @@ export async function writeClassificationLog(
       entry.jevLatencyMs,
       entry.error,
       entry.httpStatus,
+      entry.policyVersion,
     )
     .run();
 }
@@ -289,6 +299,7 @@ async function handleClassify(
   try {
     const result = await classifyVideo(video, env.TYPESAFE_API_KEY);
     const videoKey = getVideoKey(video.url);
+    const response: ClassificationResponse = { ...result, policyVersion: POLICY_VERSION };
     console.warn("jev_classification", {
       videoKey,
       title: video.title,
@@ -296,9 +307,10 @@ async function handleClassify(
       clientVersion: video.clientVersion ?? "unknown",
       category: result.category,
       confidence: result.confidence,
+      policyVersion: POLICY_VERSION,
     });
     await flushLog(logSuccess(env, video, videoKey, result, Date.now() - startedAt), ctx);
-    return json(result, 200);
+    return json(response, 200);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const videoKey = getVideoKey(video.url);
@@ -339,6 +351,7 @@ async function handleGetLogs(request: Request, env: Env): Promise<Response> {
   const limit = clampInt(url.searchParams.get("limit"), DEFAULT_LOGS_LIMIT, 1, MAX_LOGS_LIMIT);
   const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
   const category = url.searchParams.get("category") ?? "";
+  const policyVersion = url.searchParams.get("policyVersion") ?? "";
   const videoKey = url.searchParams.get("videoKey") ?? "";
   const query = url.searchParams.get("q") ?? "";
 
@@ -351,6 +364,10 @@ async function handleGetLogs(request: Request, env: Env): Promise<Response> {
   if (category !== "") {
     conditions.push("category = ?");
     bindings.push(category);
+  }
+  if (policyVersion !== "") {
+    conditions.push("policy_version = ?");
+    bindings.push(policyVersion);
   }
   const search = buildSearchFilter(videoKey, query);
   conditions.push(...search.conditions);
@@ -366,7 +383,7 @@ async function handleGetLogs(request: Request, env: Env): Promise<Response> {
     const rows = await env.DB.prepare(
       `SELECT id, created_at, video_key, url, title, channel, description_prefix,
               client_version, category, confidence, prob_study, prob_entertainment,
-              prob_other, jev_latency_ms, error, http_status
+              prob_other, jev_latency_ms, error, http_status, policy_version
          FROM classification_logs ${where}
         ORDER BY id DESC
         LIMIT ? OFFSET ?`,
@@ -541,6 +558,7 @@ interface ClassificationLogRow {
   jev_latency_ms: number | null;
   error: string | null;
   http_status: number;
+  policy_version: string;
 }
 
 function toLogApiEntry(row: ClassificationLogRow): Record<string, unknown> {
@@ -561,6 +579,7 @@ function toLogApiEntry(row: ClassificationLogRow): Record<string, unknown> {
     jevLatencyMs: row.jev_latency_ms,
     error: row.error,
     httpStatus: row.http_status,
+    policyVersion: row.policy_version,
   };
 }
 
@@ -585,6 +604,7 @@ function successEntry(
     jevLatencyMs,
     error: null,
     httpStatus: 200,
+    policyVersion: POLICY_VERSION,
   };
 }
 
@@ -609,7 +629,13 @@ async function logFailure(
   env: Env,
   entry: Omit<
     ClassificationLogEntry,
-    "confidence" | "probStudy" | "probEntertainment" | "probOther" | "jevLatencyMs" | "category"
+    | "confidence"
+    | "probStudy"
+    | "probEntertainment"
+    | "probOther"
+    | "jevLatencyMs"
+    | "category"
+    | "policyVersion"
   > & {
     category?: string;
   },
@@ -624,6 +650,7 @@ async function logFailure(
       probEntertainment: null,
       probOther: null,
       jevLatencyMs: null,
+      policyVersion: POLICY_VERSION,
     });
   } catch (error) {
     console.error("jev_log_write_error", {
