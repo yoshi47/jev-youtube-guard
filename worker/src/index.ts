@@ -65,6 +65,14 @@ export interface ClassificationLogEntry {
   httpStatus: number;
 }
 
+export interface OverrideLogEntry {
+  videoKey: string;
+  url: string;
+  title: string;
+  channel: string;
+  clientVersion: string;
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -179,6 +187,24 @@ export async function writeClassificationLog(
     .run();
 }
 
+export async function writeOverrideLog(db: D1Database, entry: OverrideLogEntry): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO override_logs
+        (created_at, video_key, url, title, channel, client_version)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      new Date().toISOString(),
+      entry.videoKey,
+      entry.url,
+      entry.title,
+      entry.channel,
+      entry.clientVersion,
+    )
+    .run();
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -191,30 +217,45 @@ export default {
       return handleGetLogs(request, env);
     }
 
+    if (request.method === "GET" && url.pathname === "/overrides") {
+      return handleGetOverrides(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/allow") {
+      if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
+        return unauthorized(env, ctx);
+      }
+      return handleAllow(request, env, ctx);
+    }
+
     if (request.method !== "POST" || url.pathname !== "/classify") {
       return json({ error: "Not found" }, 404);
     }
 
     if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-      await flushLog(
-        logFailure(env, {
-          videoKey: "",
-          url: "",
-          title: "",
-          channel: "",
-          descriptionPrefix: "",
-          clientVersion: "",
-          error: "Unauthorized",
-          httpStatus: 401,
-        }),
-        ctx,
-      );
-      return json({ error: "Unauthorized" }, 401);
+      return unauthorized(env, ctx);
     }
 
     return handleClassify(request, env, ctx);
   },
 };
+
+async function unauthorized(env: Env, ctx?: ExecutionContext): Promise<Response> {
+  await flushLog(
+    logFailure(env, {
+      videoKey: "",
+      url: "",
+      title: "",
+      channel: "",
+      descriptionPrefix: "",
+      clientVersion: "",
+      error: "Unauthorized",
+      httpStatus: 401,
+    }),
+    ctx,
+  );
+  return json({ error: "Unauthorized" }, 401);
+}
 
 async function handleClassify(
   request: Request,
@@ -311,15 +352,9 @@ async function handleGetLogs(request: Request, env: Env): Promise<Response> {
     conditions.push("category = ?");
     bindings.push(category);
   }
-  if (videoKey !== "") {
-    conditions.push("video_key = ?");
-    bindings.push(videoKey);
-  }
-  if (query !== "") {
-    conditions.push("(title LIKE ? OR channel LIKE ? OR url LIKE ?)");
-    const pattern = `%${query}%`;
-    bindings.push(pattern, pattern, pattern);
-  }
+  const search = buildSearchFilter(videoKey, query);
+  conditions.push(...search.conditions);
+  bindings.push(...search.bindings);
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
   try {
@@ -353,6 +388,140 @@ async function handleGetLogs(request: Request, env: Env): Promise<Response> {
     console.error("jev_logs_error", { error: message });
     return json({ error: "Failed to read logs" }, 500);
   }
+}
+
+async function handleAllow(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  if (!env.DB) {
+    return json({ error: "Log store is not configured" }, 503);
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid request JSON" }, 400);
+  }
+
+  if (!isRecord(body)) {
+    return json({ error: "Invalid request body" }, 400);
+  }
+
+  const videoKey = stringField(body, "videoKey");
+  const url = stringField(body, "url");
+  const title = stringField(body, "title");
+  const channel = stringField(body, "channel");
+  const clientVersion = stringField(body, "clientVersion");
+
+  if (!videoKey && !url) {
+    return json({ error: "Invalid override payload" }, 400);
+  }
+
+  await flushLog(
+    (async () => {
+      try {
+        await writeOverrideLog(env.DB as D1Database, {
+          videoKey: videoKey || getVideoKey(url),
+          url,
+          title,
+          channel,
+          clientVersion,
+        });
+      } catch (error) {
+        console.error("jev_log_write_error", {
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    })(),
+    ctx,
+  );
+  return json({ ok: true }, 200);
+}
+
+async function handleGetOverrides(request: Request, env: Env): Promise<Response> {
+  if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+
+  if (!env.DB) {
+    return json({ error: "Log store is not configured" }, 503);
+  }
+
+  const url = new URL(request.url);
+  const limit = clampInt(url.searchParams.get("limit"), DEFAULT_LOGS_LIMIT, 1, MAX_LOGS_LIMIT);
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const search = buildSearchFilter(
+    url.searchParams.get("videoKey") ?? "",
+    url.searchParams.get("q") ?? "",
+  );
+  const where = search.conditions.length > 0 ? `WHERE ${search.conditions.join(" AND ")}` : "";
+
+  try {
+    const countRow = (await env.DB.prepare(`SELECT COUNT(*) AS total FROM override_logs ${where}`)
+      .bind(...search.bindings)
+      .first<{ total: number }>()) ?? { total: 0 };
+    const rows = await env.DB.prepare(
+      `SELECT id, created_at, video_key, url, title, channel, client_version
+         FROM override_logs ${where}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?`,
+    )
+      .bind(...search.bindings, limit, offset)
+      .all<OverrideLogRow>();
+
+    return json(
+      {
+        overrides: (rows.results ?? []).map(toOverrideApiEntry),
+        total: countRow.total ?? 0,
+        limit,
+        offset,
+      },
+      200,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("jev_logs_error", { error: message });
+    return json({ error: "Failed to read logs" }, 500);
+  }
+}
+
+function buildSearchFilter(
+  videoKey: string,
+  query: string,
+): { conditions: string[]; bindings: Array<string | number> } {
+  const conditions: string[] = [];
+  const bindings: Array<string | number> = [];
+  if (videoKey !== "") {
+    conditions.push("video_key = ?");
+    bindings.push(videoKey);
+  }
+  if (query !== "") {
+    conditions.push("(title LIKE ? OR channel LIKE ? OR url LIKE ?)");
+    const pattern = `%${query}%`;
+    bindings.push(pattern, pattern, pattern);
+  }
+  return { conditions, bindings };
+}
+
+interface OverrideLogRow {
+  id: number;
+  created_at: string;
+  video_key: string;
+  url: string;
+  title: string;
+  channel: string;
+  client_version: string;
+}
+
+function toOverrideApiEntry(row: OverrideLogRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    videoKey: row.video_key,
+    url: row.url,
+    title: row.title,
+    channel: row.channel,
+    clientVersion: row.client_version,
+  };
 }
 
 interface ClassificationLogRow {

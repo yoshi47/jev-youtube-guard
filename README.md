@@ -37,10 +37,11 @@ pnpm deploy
 
 `TYPESAFE_API_KEY` にはTypeSafeのAPIキー、`CLIENT_TOKEN` にはUserscriptとWorkerで共有する個人用トークンを入力します。JevのAPIキーはUserscriptに書きません。
 
-デプロイ後、`userscripts/jev-youtube-guard.user.js` の次の2項目を更新します。
+デプロイ後、`userscripts/jev-youtube-guard.user.js` の次の3項目を更新します。
 
 ```js
 endpoint: "https://<worker-name>.<subdomain>.workers.dev/classify",
+allowEndpoint: "https://<worker-name>.<subdomain>.workers.dev/allow",
 clientToken: "<CLIENT_TOKENと同じ値>",
 ```
 
@@ -63,6 +64,13 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 ```
 
 クエリは `limit`(既定50/最大200)、`offset`、`category=study|entertainment|other`、`videoKey=<動画ID>`、`q=<title/channel/urlの部分一致>` が使えます。例: `.../logs?category=entertainment&limit=20`。
+
+「この動画だけ表示する」を押した解除操作は `POST /allow` で `override_logs` に記録されます。Userscript(0.3.0以降)が自動で送るので手動操作は不要です。一覧は `GET /overrides`(`limit/offset/videoKey/q` 対応)で見られます。
+
+```sh
+curl -H "Authorization: Bearer $CLIENT_TOKEN" \
+  "https://<worker-name>.<subdomain>.workers.dev/overrides?limit=50" | jq .
+```
 
 ## デバッグ
 

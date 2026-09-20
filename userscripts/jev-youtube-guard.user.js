@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.2.4
+// @version      0.3.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,9 +14,10 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.2.4";
+  const SCRIPT_VERSION = "0.3.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
+    allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
     clientToken: "YOUR_CLIENT_TOKEN",
     confidenceThreshold: 0.6,
   };
@@ -109,10 +110,10 @@
     }
 
     showOverlay("Jevで判定中…");
-    const cachedResult = readCachedResult(videoKey);
-    if (cachedResult) {
-      dbg(`cache hit category=${cachedResult.category} confidence=${cachedResult.confidence}`);
-      applyResult(cachedResult, overrideKey);
+    const cached = readCachedResult(videoKey);
+    if (cached) {
+      dbg(`cache hit category=${cached.result.category} confidence=${cached.result.confidence}`);
+      applyResult(cached.result, overrideKey, cached.metadata);
       return;
     }
     dbg("cache miss, reading metadata");
@@ -133,8 +134,14 @@
       if (currentToken !== runToken) return;
 
       dbg(`result category=${result.category} confidence=${result.confidence}`);
-      writeCachedResult(videoKey, result);
-      applyResult(result, overrideKey);
+      const resultMetadata = {
+        videoKey,
+        url: metadata.url,
+        title: metadata.title,
+        channel: metadata.channel,
+      };
+      writeCachedResult(videoKey, result, resultMetadata);
+      applyResult(result, overrideKey, resultMetadata);
     } catch (error) {
       // A classifier outage must not prevent normal browsing.
       console.warn("[Jev YouTube Guard] classification failed", error);
@@ -143,11 +150,17 @@
     }
   }
 
-  function applyResult(result, overrideKey) {
+  function applyResult(result, overrideKey, metadata) {
     dbg(`decision=${shouldBlock(result) ? "BLOCK" : "ALLOW"}`);
     if (shouldBlock(result)) {
       showOverlay("エンタメ判定のためブロックしました", () => {
         storageSet(overrideKey, "1");
+        void reportOverride({
+          videoKey: metadata?.videoKey || getVideoKey(location.href),
+          url: metadata?.url || location.href,
+          title: metadata?.title || "",
+          channel: metadata?.channel || "",
+        });
         hideOverlay();
       });
     } else {
@@ -179,14 +192,17 @@
         storageRemove(`${RESULT_PREFIX}${videoKey}`);
         return null;
       }
-      return cached.result;
+      return { result: cached.result, metadata: cached.metadata ?? null };
     } catch {
       return null;
     }
   }
 
-  function writeCachedResult(videoKey, result) {
-    storageSet(`${RESULT_PREFIX}${videoKey}`, JSON.stringify({ createdAt: Date.now(), result }));
+  function writeCachedResult(videoKey, result, metadata) {
+    storageSet(
+      `${RESULT_PREFIX}${videoKey}`,
+      JSON.stringify({ createdAt: Date.now(), result, metadata: metadata ?? null }),
+    );
   }
 
   function storageGet(key) {
@@ -261,6 +277,26 @@
       return response.json();
     } finally {
       clearTimeout(timeoutId);
+    }
+  }
+
+  async function reportOverride(payload) {
+    try {
+      dbg(`POST ${CONFIG.allowEndpoint}`);
+      const response = await fetch(CONFIG.allowEndpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CONFIG.clientToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ...payload, clientVersion: SCRIPT_VERSION }),
+      });
+      if (!response.ok) throw new Error(`Worker request failed: ${response.status}`);
+      dbg("override reported");
+    } catch (error) {
+      // A failed override report must not prevent watching the video.
+      console.warn("[Jev YouTube Guard] override report failed", error);
+      dbg(`override report failed: ${error instanceof Error ? error.message : error}`);
     }
   }
 
