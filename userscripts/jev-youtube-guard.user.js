@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.2.2
+// @version      0.2.3
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/watch*
 // @match        https://www.youtube.com/shorts/*
@@ -14,7 +14,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.2.2";
+  const SCRIPT_VERSION = "0.2.3";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     clientToken: "YOUR_CLIENT_TOKEN",
@@ -53,6 +53,7 @@
   async function initialize() {
     await waitForDocumentElement();
     installOverlay();
+    installGlobalErrorTrap();
     if (debugMode) installDebugPanel();
     dbg(`init url=${location.href}`);
     await evaluateCurrentVideo();
@@ -69,6 +70,18 @@
   }
 
   async function evaluateCurrentVideo() {
+    try {
+      await evaluateCurrentVideoInner();
+    } catch (error) {
+      debugMode = true;
+      installDebugPanel();
+      dbg(`FATAL: ${error instanceof Error ? error.message : error}`);
+      if (error instanceof Error && error.stack) dbg(`STACK: ${error.stack}`);
+      console.error("[Jev YouTube Guard] fatal", error);
+    }
+  }
+
+  async function evaluateCurrentVideoInner() {
     debugMode = DEBUG_FORCE_ON || isDebugEnabled(location.href);
     if (debugMode) installDebugPanel();
     dbg(`evaluate url=${location.href}`);
@@ -86,7 +99,10 @@
     activeVideoKey = videoKey;
 
     const overrideKey = `${OVERRIDE_PREFIX}${videoKey}`;
-    if (storageGet(overrideKey) === "1") {
+    dbg("checking override");
+    const overrideValue = storageGet(overrideKey);
+    dbg(`override=${overrideValue}`);
+    if (overrideValue === "1") {
       dbg("allow-listed override, skip");
       hideOverlay();
       return;
@@ -366,6 +382,18 @@
       "pointer-events: none",
     ].join(";");
     document.documentElement.appendChild(panel);
+  }
+
+  function installGlobalErrorTrap() {
+    window.addEventListener("error", (event) => {
+      try {
+        debugMode = true;
+        installDebugPanel();
+        dbg(`window.onerror: ${event.message}`);
+      } catch {
+        // Never let the error trap break the page.
+      }
+    });
   }
 
   function waitForDocumentElement() {
