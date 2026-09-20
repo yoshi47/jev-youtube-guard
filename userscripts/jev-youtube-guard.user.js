@@ -1,20 +1,17 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.5.0
+// @version      0.6.4
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
-// @match        https://www.youtube.com/watch*
-// @match        https://www.youtube.com/shorts/*
-// @match        https://youtube.com/watch*
-// @match        https://youtube.com/shorts/*
-// @match        https://m.youtube.com/watch*
-// @match        https://m.youtube.com/shorts/*
+// @match        https://www.youtube.com/*
+// @match        https://youtube.com/*
+// @match        https://m.youtube.com/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.5.0";
+  const SCRIPT_VERSION = "0.6.4";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -51,8 +48,17 @@
   // Last classification for the false-negative feedback button (log-only).
   let lastMetadata = null;
   let lastResult = null;
+  // Debounce SPA event storms (yt-page-data-updated fires dozens of times).
+  let evalTimer = 0;
+  // Full log history for the copy button; panel shows only the tail.
+  const logHistory = [];
+  const LOG_HISTORY_MAX = 200;
+  const LOG_PANEL_MAX = 25;
 
-  if (typeof document === "undefined" || !isTargetPage(location.href)) return;
+  // Stay resident on list pages (/, /results, /feed, ...) so SPA navigation
+  // from a list to /watch can still be detected. Target filtering happens
+  // inside evaluateCurrentVideoInner().
+  if (typeof document === "undefined") return;
 
   debugMode = DEBUG_FORCE_ON || isDebugEnabled(location.href);
 
@@ -67,14 +73,39 @@
     await evaluateCurrentVideo();
 
     document.addEventListener("yt-navigate-finish", () => {
-      void evaluateCurrentVideo();
+      scheduleEvaluate();
     });
     document.addEventListener("yt-page-data-updated", () => {
-      void evaluateCurrentVideo();
+      scheduleEvaluate();
     });
     window.addEventListener("popstate", () => {
-      void evaluateCurrentVideo();
+      scheduleEvaluate();
     });
+    // Fallback for SPA transitions where YouTube's custom events don't fire.
+    // Wrapping pushState/replaceState catches list -> watch taps.
+    // Debounced: a burst of pushStates becomes one evaluation.
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    history.pushState = function (...args) {
+      const result = originalPushState.apply(this, args);
+      scheduleEvaluate();
+      return result;
+    };
+    history.replaceState = function (...args) {
+      const result = originalReplaceState.apply(this, args);
+      scheduleEvaluate();
+      return result;
+    };
+    window.addEventListener("hashchange", () => {
+      scheduleEvaluate();
+    });
+  }
+
+  function scheduleEvaluate() {
+    window.clearTimeout(evalTimer);
+    evalTimer = window.setTimeout(() => {
+      void evaluateCurrentVideo();
+    }, 400);
   }
 
   async function evaluateCurrentVideo() {
@@ -92,18 +123,20 @@
   async function evaluateCurrentVideoInner() {
     debugMode = DEBUG_FORCE_ON || isDebugEnabled(location.href);
     if (debugMode) installDebugPanel();
-    dbg(`evaluate url=${location.href}`);
     if (!isTargetPage(location.href)) {
+      if (activeVideoKey !== "") dbg(`leave video ${activeVideoKey}`);
       activeVideoKey = "";
+      // Cancel any in-flight classification for the previous video.
+      runToken++;
       hideOverlay();
-      dbg("not a target page, skip");
       return;
     }
 
-    const currentToken = ++runToken;
     const videoKey = getVideoKey(location.href);
-    dbg(`videoKey=${videoKey || "(empty)"}`);
+    // Same-video events (progress, comments, pushState bursts) are silent.
     if (!videoKey || videoKey === activeVideoKey) return;
+    dbg(`evaluate videoKey=${videoKey}`);
+    const currentToken = ++runToken;
     activeVideoKey = videoKey;
     lastMetadata = null;
     lastResult = null;
@@ -256,33 +289,93 @@
   }
 
   async function readVideoMetadata(videoKey) {
-    const deadline = Date.now() + 8_000;
+    const deadline = Date.now() + 10_000;
+    let attempts = 0;
     while (Date.now() < deadline) {
+      attempts++;
+      const player = getPlayerDetails();
       const title =
-        findText(["h1.ytd-watch-metadata yt-formatted-string", "h1 yt-formatted-string"]) ||
+        findText([
+          "h1.ytd-watch-metadata yt-formatted-string",
+          "h1 yt-formatted-string",
+          "ytd-watch-flexy h1",
+          "ytd-video-primary-info-renderer #title",
+          "#info #title",
+          "#title h1",
+          "h2.reel-player-header-title",
+          ".yt-core-attributed-string",
+        ]) ||
+        player.title ||
+        metaContent('meta[property="og:title"]') ||
         metaContent('meta[name="title"]') ||
         document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
       const channel =
-        findText(["ytd-watch-metadata ytd-channel-name a", "#owner ytd-channel-name a"]) ||
+        findText([
+          "ytd-watch-metadata ytd-channel-name a",
+          "#owner ytd-channel-name a",
+          "ytd-video-owner-renderer #channel-name a",
+          "ytd-video-owner-renderer #owner-text a",
+          "#owner-text a",
+          "ytd-channel-name a",
+          "#channel-name a",
+          "#owner a",
+        ]) ||
+        findHandleText() ||
+        player.author ||
         metaContent('[itemprop="author"] [itemprop="name"]') ||
         metaContent('[itemprop="author"]');
 
       if (title && channel) {
+        if (player.fromPlayer && !findText(["h1 yt-formatted-string"])) {
+          dbg(`metadata via player response (attempt ${attempts})`);
+        }
         return {
           url: location.href,
           title,
           channel,
-          description: findText([
-            "ytd-text-inline-expander#description-inline-expander",
-            "#description",
-          ]),
+          description:
+            player.description ||
+            findText(["ytd-text-inline-expander#description-inline-expander", "#description"]),
           videoKey,
           clientVersion: SCRIPT_VERSION,
         };
       }
+      // One line per ~2s so the panel stays readable.
+      if (attempts === 1 || attempts % 8 === 0) {
+        dbg(
+          `waiting metadata (${attempts}): title=${title.length}ch channel=${channel.length}ch player=${player.found ? "y" : "n"}`,
+        );
+      }
       await delay(250);
     }
+    dbg("metadata timeout");
     return null;
+  }
+
+  // window.ytInitialPlayerResponse is refreshed on SPA navigations while
+  // <head> meta tags stay stale, so it is the most reliable SPA fallback.
+  function getPlayerDetails() {
+    try {
+      const response = window.ytInitialPlayerResponse;
+      const details = response?.videoDetails;
+      if (details && typeof details === "object") {
+        const title = typeof details.title === "string" ? details.title.trim() : "";
+        const author = typeof details.author === "string" ? details.author.trim() : "";
+        return {
+          title,
+          author,
+          description:
+            typeof details.shortDescription === "string"
+              ? details.shortDescription.slice(0, 8000)
+              : "",
+          found: true,
+          fromPlayer: Boolean(title || author),
+        };
+      }
+      return { title: "", author: "", description: "", found: false, fromPlayer: false };
+    } catch {
+      return { title: "", author: "", description: "", found: false, fromPlayer: false };
+    }
   }
 
   async function classify(metadata) {
@@ -417,6 +510,23 @@
     return "";
   }
 
+  // Channel handle links like <a href="/@xxx">@xxx</a> exist on mobile/SPA
+  // layouts where the owner-renderer selectors above miss.
+  function findHandleText() {
+    const candidates = ['a[href^="/@"]', 'a[href*="/channel/"]', 'a[href*="/user/"]'];
+    for (const selector of candidates) {
+      const elements = document.querySelectorAll(selector);
+      for (const element of elements) {
+        const text = element?.textContent?.trim();
+        // Skip nav/drawer links: handles start with @ or live inside owner area.
+        if (!text) continue;
+        if (selector === 'a[href^="/@"]' && text.startsWith("@")) return text;
+        if (element.closest("#owner, ytd-video-owner-renderer, ytd-channel-name")) return text;
+      }
+    }
+    return "";
+  }
+
   function metaContent(selector) {
     return document.querySelector(selector)?.getAttribute("content")?.trim() || "";
   }
@@ -433,18 +543,20 @@
 
   function dbg(message) {
     if (!debugMode) return;
+    const stamped = `${new Date().toISOString().slice(11, 19)} ${message}`;
     console.warn("[Jev YouTube Guard][debug]", message);
+    logHistory.push(stamped);
+    if (logHistory.length > LOG_HISTORY_MAX)
+      logHistory.splice(0, logHistory.length - LOG_HISTORY_MAX);
     const panel = document.getElementById(DEBUG_PANEL_ID);
     if (!panel) return;
+    const logBox = panel.querySelector('[data-logbox="1"]');
+    if (!logBox) return;
     const line = document.createElement("div");
-    line.textContent = `${new Date().toISOString().slice(11, 19)} ${message}`;
-    panel.appendChild(line);
-    // Keep the feedback button pinned: only trim log lines.
-    while (panel.querySelectorAll(":scope > div").length > 40) {
-      const oldest = Array.from(panel.children).find((child) => child.id !== FEEDBACK_BUTTON_ID);
-      if (!oldest) break;
-      oldest.remove();
-    }
+    line.textContent = stamped;
+    logBox.appendChild(line);
+    while (logBox.children.length > LOG_PANEL_MAX) logBox.removeChild(logBox.firstChild);
+    logBox.scrollTop = logBox.scrollHeight;
   }
 
   function installDebugPanel() {
@@ -457,7 +569,7 @@
       "bottom: 8px",
       "z-index: 2147483647",
       "max-width: 92vw",
-      "max-height: 40vh",
+      "max-height: 30vh",
       "overflow-y: auto",
       "background: rgba(0, 0, 0, 0.85)",
       "color: #0f0",
@@ -466,8 +578,53 @@
       "word-break: break-all",
       "padding: 8px",
       "border-radius: 8px",
-      "pointer-events: none",
+      "pointer-events: auto",
+      "-webkit-overflow-scrolling: touch",
+      "touch-action: pan-y",
     ].join(";");
+    const header = document.createElement("div");
+    header.textContent = `Jev Guard v${SCRIPT_VERSION} (tap to collapse)`;
+    header.style.cssText = "margin-bottom: 6px; opacity: 0.8; cursor: pointer;";
+    const logBox = document.createElement("div");
+    logBox.setAttribute("data-logbox", "1");
+    // Replay history if the panel was installed late.
+    for (const line of logHistory.slice(-LOG_PANEL_MAX)) {
+      const div = document.createElement("div");
+      div.textContent = line;
+      logBox.appendChild(div);
+    }
+    let collapsed = false;
+    header.addEventListener("click", () => {
+      collapsed = !collapsed;
+      logBox.style.display = collapsed ? "none" : "";
+    });
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.textContent = "ログをコピー";
+    copyButton.style.cssText = [
+      "display: block",
+      "margin-bottom: 6px",
+      "padding: 6px 10px",
+      "border: 1px solid #0f0",
+      "border-radius: 6px",
+      "background: #002200",
+      "color: #0f0",
+      "font: 11px monospace",
+      "pointer-events: auto",
+    ].join(";");
+    copyButton.addEventListener("click", () => {
+      const text = logHistory.join("\n") || "(empty)";
+      const done = () => dbg("logs copied");
+      try {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+        } else {
+          fallbackCopy(text, done);
+        }
+      } catch {
+        fallbackCopy(text, done);
+      }
+    });
     const feedbackButton = document.createElement("button");
     feedbackButton.id = FEEDBACK_BUTTON_ID;
     feedbackButton.type = "button";
@@ -499,16 +656,50 @@
         kind: "false-negative",
       });
     });
+    panel.appendChild(header);
+    panel.appendChild(copyButton);
     panel.appendChild(feedbackButton);
+    panel.appendChild(logBox);
     document.documentElement.appendChild(panel);
+  }
+
+  function fallbackCopy(text, done) {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.cssText = "position: fixed; opacity: 0;";
+      document.documentElement.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    } catch {
+      // Clipboard unavailable: history stays in console.warn anyway.
+    }
+    done();
   }
 
   function installGlobalErrorTrap() {
     window.addEventListener("error", (event) => {
       try {
+        // YouTube itself throws cross-origin "Script error." noise constantly.
+        // Without a filename it is sanitized and almost certainly not ours.
+        const message = event.message || "";
+        const filename = event.filename || "";
+        const stack = event.error?.stack || "";
+        if (message === "Script error." && !filename) return;
+        const isOurs =
+          filename.includes("jev-youtube-guard") ||
+          stack.includes("JevYouTubeGuard") ||
+          stack.includes("jev-youtube-guard") ||
+          message.includes("[Jev YouTube Guard]");
+        if (!isOurs) {
+          // Page's own error: note it but don't force the debug panel on.
+          console.warn("[Jev YouTube Guard] page error (ignored)", message);
+          return;
+        }
         debugMode = true;
         installDebugPanel();
-        dbg(`window.onerror: ${event.message}`);
+        dbg(`window.onerror: ${message}`);
       } catch {
         // Never let the error trap break the page.
       }
