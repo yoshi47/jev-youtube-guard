@@ -91,12 +91,7 @@ pnpm build
 
 ## 判定ログ
 
-`/classify` への認証済みリクエストは全件、D1(`jev-youtube-guard-logs` / `classification_logs`)に記録されます。成功だけでなく、Jevエラーや不正リクエスト(400/502)も残ります。保存内容は `videoKey, url, title, channel, description先頭500字, clientVersion, category, confidence, 確率3種, Jevレイテンシ, error, httpStatus` です。
-
-```sh
-pnpm d1:migrate:remote
-pnpm deploy
-```
+`/classify` への認証済みリクエストは全件、D1(`jev-youtube-guard-logs` / `classification_logs`)に記録されます。D1の作成とマイグレーションは `pnpm setup` が済ませているので、ここでは見る方法だけ説明します。成功だけでなく、Jevエラーや不正リクエスト(400/502)も残ります。保存内容は `videoKey, url, title, channel, description先頭500字, clientVersion, category, confidence, 確率3種, Jevレイテンシ, error, httpStatus` です。
 
 後から見るには、Userscriptと同じ `CLIENT_TOKEN` で `GET /logs` を叩きます。
 
