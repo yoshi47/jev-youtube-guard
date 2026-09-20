@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  JEV_MODEL,
   buildJevRequest,
   classifyVideo,
   getVideoKey,
@@ -22,6 +23,30 @@ const video: VideoMetadata = {
   description: "大学受験向けの数学講義です",
 };
 
+const dummyAi = { run: vi.fn() } as unknown as Ai;
+
+function jevSuccessAnswer(choice = "entertainment", confidence = 0.88): JevResponse {
+  return {
+    model: "jev-1.13.0",
+    answers: {
+      category: {
+        choice,
+        probabilities: { study: 0.02, entertainment: 0.96, other: 0.02 },
+        confidence,
+      },
+    },
+    usage: { input_tokens: 400, output_tokens: 50 },
+  };
+}
+
+function createMockAi(answer: unknown = jevSuccessAnswer()): {
+  ai: Ai;
+  run: ReturnType<typeof vi.fn>;
+} {
+  const run = vi.fn().mockResolvedValue(answer);
+  return { ai: { run } as unknown as Ai, run };
+}
+
 describe("isAuthorized", () => {
   it("accepts only the configured bearer token", () => {
     expect(isAuthorized("Bearer personal-token", "personal-token")).toBe(true);
@@ -33,8 +58,7 @@ describe("isAuthorized", () => {
 describe("buildJevRequest", () => {
   it("asks Jev to classify a video into the supported categories", () => {
     expect(buildJevRequest(video)).toEqual({
-      state: JSON.stringify(video),
-      model: "jev-latest",
+      state: video,
       questions: {
         category: {
           type: "choice",
@@ -85,117 +109,87 @@ describe("normalizeJevResponse", () => {
 });
 
 describe("classifyVideo", () => {
-  it("calls Jev with the API key and normalizes the response", async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          answers: {
-            category: {
-              choice: "study",
-              probabilities: { study: 0.9, entertainment: 0.05, other: 0.05 },
-              confidence: 0.8,
-            },
-          },
-        }),
-        { status: 200 },
-      ),
-    );
+  it("calls Workers AI Jev and normalizes the response", async () => {
+    const { ai, run } = createMockAi({
+      model: "jev-1.13.0",
+      answers: {
+        category: {
+          choice: "study",
+          probabilities: { study: 0.9, entertainment: 0.05, other: 0.05 },
+          confidence: 0.8,
+        },
+      },
+    });
 
-    await expect(classifyVideo(video, "jev-key", fetcher)).resolves.toMatchObject({
+    await expect(classifyVideo(video, ai)).resolves.toMatchObject({
       category: "study",
       confidence: 0.8,
     });
-    expect(fetcher).toHaveBeenCalledWith(
-      "https://api.typesafe.ai/v1/systemone",
-      expect.objectContaining({
-        method: "POST",
-        headers: {
-          Authorization: "Bearer jev-key",
-          "Content-Type": "application/json",
-        },
-      }),
-    );
+    expect(run).toHaveBeenCalledWith(JEV_MODEL, expect.objectContaining({ state: video }));
   });
 
-  it("throws on an unsuccessful Jev response", async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response("upstream failure", { status: 503 }));
+  it("throws on a Jev failure", async () => {
+    const failingRun = vi.fn().mockRejectedValue(new Error("upstream failure"));
+    const failingAi = { run: failingRun } as unknown as Ai;
 
-    await expect(classifyVideo(video, "jev-key", fetcher)).rejects.toThrow(
-      "Jev request failed: 503",
-    );
+    await expect(classifyVideo(video, failingAi)).rejects.toThrow("Jev request failed");
   });
 });
 
 describe("Env", () => {
   it("documents the Worker secret boundary", () => {
-    const env: Env = { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" };
-    expect(env.TYPESAFE_API_KEY).toBe("jev-key");
+    const env: Env = { CLIENT_TOKEN: "client", AI: dummyAi };
+    expect(env.CLIENT_TOKEN).toBe("client");
   });
 });
 
 describe("Worker fetch handler", () => {
   it("answers CORS preflight without calling Jev", async () => {
+    const { ai, run } = createMockAi();
     const response = await worker.fetch(
       new Request("https://guard.example/classify", { method: "OPTIONS" }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+      { CLIENT_TOKEN: "client", AI: ai },
     );
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("rejects a request without the client token", async () => {
+    const { ai } = createMockAi();
     const response = await worker.fetch(
       new Request("https://guard.example/classify", {
         method: "POST",
         body: JSON.stringify(video),
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+      { CLIENT_TOKEN: "client", AI: ai },
     );
 
     expect(response.status).toBe(401);
   });
 
   it("classifies an authorized video through Jev", async () => {
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          answers: {
-            category: {
-              choice: "entertainment",
-              probabilities: { study: 0.02, entertainment: 0.96, other: 0.02 },
-              confidence: 0.88,
-            },
-          },
-        }),
-        { status: 200 },
-      ),
+    const { ai } = createMockAi(jevSuccessAnswer("entertainment", 0.88));
+
+    const response = await worker.fetch(
+      new Request("https://guard.example/classify", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer client",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(video),
+      }),
+      { CLIENT_TOKEN: "client", AI: ai },
     );
 
-    try {
-      const response = await worker.fetch(
-        new Request("https://guard.example/classify", {
-          method: "POST",
-          headers: {
-            Authorization: "Bearer client",
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(video),
-        }),
-        { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
-      );
-
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({
-        category: "entertainment",
-        confidence: 0.88,
-        policyVersion: "1",
-      });
-    } finally {
-      fetcher.mockRestore();
-    }
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      category: "entertainment",
+      confidence: 0.88,
+      policyVersion: "1",
+    });
   });
 });
 
@@ -224,19 +218,8 @@ describe("Userscript policy", () => {
   });
 });
 
-function jevSuccessResponse() {
-  return new Response(
-    JSON.stringify({
-      answers: {
-        category: {
-          choice: "entertainment",
-          probabilities: { study: 0.02, entertainment: 0.96, other: 0.02 },
-          confidence: 0.88,
-        },
-      },
-    }),
-    { status: 200 },
-  );
+function jevSuccessResponse(): JevResponse {
+  return jevSuccessAnswer("entertainment", 0.88);
 }
 
 function classifyRequest(body: unknown, token = "Bearer client") {
@@ -319,61 +302,54 @@ describe("writeClassificationLog", () => {
 
 describe("Classification logging on /classify", () => {
   it("writes a success log with video metadata and the result", async () => {
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
+    const { ai } = createMockAi(jevSuccessResponse());
     const { db, run, statements } = createMockDb();
-    try {
-      const response = await worker.fetch(classifyRequest(video), {
-        TYPESAFE_API_KEY: "jev-key",
-        CLIENT_TOKEN: "client",
-        DB: db,
-      });
+    const response = await worker.fetch(classifyRequest(video), {
+      CLIENT_TOKEN: "client",
+      AI: ai,
+      DB: db,
+    });
 
-      expect(response.status).toBe(200);
-      expect(run).toHaveBeenCalledTimes(1);
-      expect(statements[0]?.params).toEqual(
-        expect.arrayContaining([
-          "abc",
-          "https://www.youtube.com/watch?v=abc",
-          "東大入試数学を解説します",
-          "entertainment",
-          0.88,
-          200,
-          "1",
-        ]),
-      );
-    } finally {
-      fetcher.mockRestore();
-    }
+    expect(response.status).toBe(200);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.params).toEqual(
+      expect.arrayContaining([
+        "abc",
+        "https://www.youtube.com/watch?v=abc",
+        "東大入試数学を解説します",
+        "entertainment",
+        0.88,
+        200,
+        "1",
+      ]),
+    );
   });
 
   it("writes an error log when Jev fails", async () => {
-    const fetcher = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response("upstream failure", { status: 503 }));
+    const failingAi = {
+      run: vi.fn().mockRejectedValue(new Error("upstream failure")),
+    } as unknown as Ai;
     const { db, run, statements } = createMockDb();
-    try {
-      const response = await worker.fetch(classifyRequest(video), {
-        TYPESAFE_API_KEY: "jev-key",
-        CLIENT_TOKEN: "client",
-        DB: db,
-      });
+    const response = await worker.fetch(classifyRequest(video), {
+      CLIENT_TOKEN: "client",
+      AI: failingAi,
+      DB: db,
+    });
 
-      expect(response.status).toBe(502);
-      expect(run).toHaveBeenCalledTimes(1);
-      expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", 502]));
-      const params = statements[0]?.params ?? [];
-      // [..., jevLatencyMs, error, httpStatus, policyVersion]
-      expect(params[params.length - 3]).toMatch(/Jev request failed/);
-    } finally {
-      fetcher.mockRestore();
-    }
+    expect(response.status).toBe(502);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", 502]));
+    const params = statements[0]?.params ?? [];
+    // [..., jevLatencyMs, error, httpStatus, policyVersion]
+    expect(params[params.length - 3]).toMatch(/Jev request failed/);
   });
 
   it("writes an error log for invalid request metadata", async () => {
+    const { ai } = createMockAi();
     const { db, run, statements } = createMockDb();
     const response = await worker.fetch(classifyRequest({ title: "only" }), {
-      TYPESAFE_API_KEY: "jev-key",
       CLIENT_TOKEN: "client",
+      AI: ai,
       DB: db,
     });
 
@@ -383,10 +359,11 @@ describe("Classification logging on /classify", () => {
   });
 
   it("writes an unauthorized log when the token is wrong", async () => {
+    const { ai } = createMockAi();
     const { db, run, statements } = createMockDb();
     const response = await worker.fetch(classifyRequest(video, "Bearer wrong"), {
-      TYPESAFE_API_KEY: "jev-key",
       CLIENT_TOKEN: "client",
+      AI: ai,
       DB: db,
     });
 
@@ -396,17 +373,13 @@ describe("Classification logging on /classify", () => {
   });
 
   it("still classifies when no log store is configured", async () => {
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
-    try {
-      const response = await worker.fetch(classifyRequest(video), {
-        TYPESAFE_API_KEY: "jev-key",
-        CLIENT_TOKEN: "client",
-      });
+    const { ai } = createMockAi(jevSuccessResponse());
+    const response = await worker.fetch(classifyRequest(video), {
+      CLIENT_TOKEN: "client",
+      AI: ai,
+    });
 
-      expect(response.status).toBe(200);
-    } finally {
-      fetcher.mockRestore();
-    }
+    expect(response.status).toBe(200);
   });
 });
 
@@ -414,7 +387,7 @@ describe("GET /logs", () => {
   it("rejects a request without the client token", async () => {
     const { db } = createMockDb();
     const response = await worker.fetch(new Request("https://guard.example/logs"), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -427,7 +400,7 @@ describe("GET /logs", () => {
       new Request("https://guard.example/logs", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+      { AI: dummyAi, CLIENT_TOKEN: "client" },
     );
 
     expect(response.status).toBe(503);
@@ -439,7 +412,7 @@ describe("GET /logs", () => {
       new Request("https://guard.example/logs?category=bogus", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(400);
@@ -471,7 +444,7 @@ describe("GET /logs", () => {
       new Request("https://guard.example/logs?limit=10&category=entertainment", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(200);
@@ -496,7 +469,7 @@ describe("GET /logs", () => {
       new Request("https://guard.example/logs?policyVersion=1", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(200);
@@ -517,7 +490,7 @@ describe("POST /allow", () => {
   it("rejects a request without the client token and logs it", async () => {
     const { db, run, statements } = createMockDb();
     const response = await worker.fetch(allowRequest({ videoKey: "abc" }, "Bearer wrong"), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -529,7 +502,7 @@ describe("POST /allow", () => {
 
   it("returns 503 when no log store is configured", async () => {
     const response = await worker.fetch(allowRequest({ videoKey: "abc" }), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
     });
 
@@ -539,7 +512,7 @@ describe("POST /allow", () => {
   it("rejects an override without videoKey or url", async () => {
     const { db, run } = createMockDb();
     const response = await worker.fetch(allowRequest({ title: "only" }), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -558,7 +531,7 @@ describe("POST /allow", () => {
         channel: "channel",
         clientVersion: "0.3.0",
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(200);
@@ -575,7 +548,7 @@ describe("GET /overrides", () => {
   it("rejects a request without the client token", async () => {
     const { db } = createMockDb();
     const response = await worker.fetch(new Request("https://guard.example/overrides"), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -588,7 +561,7 @@ describe("GET /overrides", () => {
       new Request("https://guard.example/overrides", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+      { AI: dummyAi, CLIENT_TOKEN: "client" },
     );
 
     expect(response.status).toBe(503);
@@ -609,7 +582,7 @@ describe("GET /overrides", () => {
       new Request("https://guard.example/overrides?limit=10&videoKey=abc", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(200);
@@ -634,7 +607,7 @@ describe("POST /feedback", () => {
   it("rejects a request without the client token and logs it", async () => {
     const { db, run, statements } = createMockDb();
     const response = await worker.fetch(feedbackRequest({ videoKey: "abc" }, "Bearer wrong"), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -646,7 +619,7 @@ describe("POST /feedback", () => {
 
   it("returns 503 when no log store is configured", async () => {
     const response = await worker.fetch(feedbackRequest({ videoKey: "abc" }), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
     });
 
@@ -656,7 +629,7 @@ describe("POST /feedback", () => {
   it("rejects feedback without videoKey or url", async () => {
     const { db, run } = createMockDb();
     const response = await worker.fetch(feedbackRequest({ title: "only" }), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -679,7 +652,7 @@ describe("POST /feedback", () => {
         kind: "false-negative",
         note: "",
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(200);
@@ -694,7 +667,7 @@ describe("POST /feedback", () => {
   it("defaults an unknown kind to false-negative", async () => {
     const { db, run, statements } = createMockDb();
     const response = await worker.fetch(feedbackRequest({ videoKey: "abc", kind: "bogus" }), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -709,7 +682,7 @@ describe("GET /feedback", () => {
   it("rejects a request without the client token", async () => {
     const { db } = createMockDb();
     const response = await worker.fetch(new Request("https://guard.example/feedback"), {
-      TYPESAFE_API_KEY: "jev-key",
+      AI: dummyAi,
       CLIENT_TOKEN: "client",
       DB: db,
     });
@@ -722,7 +695,7 @@ describe("GET /feedback", () => {
       new Request("https://guard.example/feedback", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+      { AI: dummyAi, CLIENT_TOKEN: "client" },
     );
 
     expect(response.status).toBe(503);
@@ -747,7 +720,7 @@ describe("GET /feedback", () => {
       new Request("https://guard.example/feedback?limit=10&videoKey=abc", {
         headers: { Authorization: "Bearer client" },
       }),
-      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+      { AI: dummyAi, CLIENT_TOKEN: "client", DB: db },
     );
 
     expect(response.status).toBe(200);
