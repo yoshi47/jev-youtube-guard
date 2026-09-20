@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildJevRequest,
   classifyVideo,
+  getVideoKey,
   isAuthorized,
   normalizeJevResponse,
+  toLogDescriptionPrefix,
+  writeClassificationLog,
   type Env,
   type JevResponse,
   type VideoMetadata,
@@ -210,5 +213,250 @@ describe("Userscript policy", () => {
     expect(policy.shouldBlock({ category: "entertainment", confidence: 0.6 })).toBe(true);
     expect(policy.shouldBlock({ category: "entertainment", confidence: 0.59 })).toBe(false);
     expect(policy.shouldBlock({ category: "study", confidence: 0.99 })).toBe(false);
+  });
+});
+
+function jevSuccessResponse() {
+  return new Response(
+    JSON.stringify({
+      answers: {
+        category: {
+          choice: "entertainment",
+          probabilities: { study: 0.02, entertainment: 0.96, other: 0.02 },
+          confidence: 0.88,
+        },
+      },
+    }),
+    { status: 200 },
+  );
+}
+
+function classifyRequest(body: unknown, token = "Bearer client") {
+  return new Request("https://guard.example/classify", {
+    method: "POST",
+    headers: { Authorization: token, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+interface MockDb {
+  db: D1Database;
+  run: ReturnType<typeof vi.fn>;
+  first: ReturnType<typeof vi.fn>;
+  all: ReturnType<typeof vi.fn>;
+  statements: Array<{ sql: string; params: Array<unknown> }>;
+}
+
+function createMockDb(
+  firstResult: unknown = { total: 0 },
+  allResult: unknown = { results: [] },
+): MockDb {
+  const statements: Array<{ sql: string; params: Array<unknown> }> = [];
+  const run = vi.fn().mockResolvedValue({ success: true });
+  const first = vi.fn().mockResolvedValue(firstResult);
+  const all = vi.fn().mockResolvedValue(allResult);
+  const db = {
+    prepare: vi.fn((sql: string) => ({
+      bind: (...params: Array<unknown>) => {
+        statements.push({ sql, params });
+        return { run, first, all };
+      },
+    })),
+  } as unknown as D1Database;
+  return { db, run, first, all, statements };
+}
+
+describe("getVideoKey", () => {
+  it("extracts watch and shorts keys", () => {
+    expect(getVideoKey("https://www.youtube.com/watch?v=abc123")).toBe("abc123");
+    expect(getVideoKey("https://www.youtube.com/shorts/xyz")).toBe("xyz");
+    expect(getVideoKey("https://www.youtube.com/")).toBe("");
+    expect(getVideoKey("not a url")).toBe("");
+  });
+});
+
+describe("toLogDescriptionPrefix", () => {
+  it("keeps only the first 500 characters", () => {
+    expect(toLogDescriptionPrefix("a".repeat(600))).toHaveLength(500);
+    expect(toLogDescriptionPrefix("short")).toBe("short");
+  });
+});
+
+describe("writeClassificationLog", () => {
+  it("inserts a log row with bound values", async () => {
+    const { db, run, statements } = createMockDb();
+    await writeClassificationLog(db, {
+      videoKey: "abc",
+      url: "https://www.youtube.com/watch?v=abc",
+      title: "title",
+      channel: "channel",
+      descriptionPrefix: "desc",
+      clientVersion: "0.1.3",
+      category: "study",
+      confidence: 0.9,
+      probStudy: 0.9,
+      probEntertainment: 0.05,
+      probOther: 0.05,
+      jevLatencyMs: 123,
+      error: null,
+      httpStatus: 200,
+    });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.sql).toContain("INSERT INTO classification_logs");
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study", 0.9, 200]));
+  });
+});
+
+describe("Classification logging on /classify", () => {
+  it("writes a success log with video metadata and the result", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
+    const { db, run, statements } = createMockDb();
+    try {
+      const response = await worker.fetch(classifyRequest(video), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+        DB: db,
+      });
+
+      expect(response.status).toBe(200);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(statements[0]?.params).toEqual(
+        expect.arrayContaining([
+          "abc",
+          "https://www.youtube.com/watch?v=abc",
+          "東大入試数学を解説します",
+          "entertainment",
+          0.88,
+          200,
+        ]),
+      );
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("writes an error log when Jev fails", async () => {
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("upstream failure", { status: 503 }));
+    const { db, run, statements } = createMockDb();
+    try {
+      const response = await worker.fetch(classifyRequest(video), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+        DB: db,
+      });
+
+      expect(response.status).toBe(502);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", 502]));
+      const errorIndex = (statements[0]?.params.length ?? 0) - 2;
+      expect(statements[0]?.params[errorIndex]).toMatch(/Jev request failed/);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("writes an error log for invalid request metadata", async () => {
+    const { db, run, statements } = createMockDb();
+    const response = await worker.fetch(classifyRequest({ title: "only" }), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(400);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(statements[0]?.params).toEqual(expect.arrayContaining([400]));
+  });
+
+  it("still classifies when no log store is configured", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
+    try {
+      const response = await worker.fetch(classifyRequest(video), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+      });
+
+      expect(response.status).toBe(200);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+});
+
+describe("GET /logs", () => {
+  it("rejects a request without the client token", async () => {
+    const { db } = createMockDb();
+    const response = await worker.fetch(new Request("https://guard.example/logs"), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+      DB: db,
+    });
+
+    expect(response.status).toBe(401);
+  });
+
+  it("returns 503 when no log store is configured", async () => {
+    const response = await worker.fetch(
+      new Request("https://guard.example/logs", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+    );
+
+    expect(response.status).toBe(503);
+  });
+
+  it("rejects an invalid category filter", async () => {
+    const { db, all } = createMockDb();
+    const response = await worker.fetch(
+      new Request("https://guard.example/logs?category=bogus", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+    );
+
+    expect(response.status).toBe(400);
+    expect(all).not.toHaveBeenCalled();
+  });
+
+  it("returns logs with total, limit, and offset", async () => {
+    const row = {
+      id: 1,
+      created_at: "2026-09-20T00:00:00.000Z",
+      video_key: "abc",
+      url: "https://www.youtube.com/watch?v=abc",
+      title: "title",
+      channel: "channel",
+      description_prefix: "desc",
+      client_version: "0.1.3",
+      category: "entertainment",
+      confidence: 0.88,
+      prob_study: 0.02,
+      prob_entertainment: 0.96,
+      prob_other: 0.02,
+      jev_latency_ms: 100,
+      error: null,
+      http_status: 200,
+    };
+    const { db } = createMockDb({ total: 1 }, { results: [row] });
+    const response = await worker.fetch(
+      new Request("https://guard.example/logs?limit=10&category=entertainment", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      total: 1,
+      limit: 10,
+      offset: 0,
+      logs: [
+        expect.objectContaining({ videoKey: "abc", category: "entertainment", httpStatus: 200 }),
+      ],
+    });
   });
 });

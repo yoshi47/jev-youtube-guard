@@ -4,4 +4,12 @@
   "compatibility_date": "2026-09-20",
   "main": "worker/src/index.ts",
   "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jev-youtube-guard-logs",
+      "database_id": "YOUR_D1_DATABASE_ID",
+      "migrations_dir": "worker/migrations",
+    },
+  ],
 }

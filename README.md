@@ -46,6 +46,24 @@ clientToken: "<CLIENT_TOKENと同じ値>",
 
 Userscripts拡張にこの `.user.js` を登録し、iPhoneの「設定 → Safari → 拡張機能」で有効化してYouTubeへのアクセスを許可します。
 
+## 判定ログ
+
+`/classify` への認証済みリクエストは全件、D1(`jev-youtube-guard-logs` / `classification_logs`)に記録されます。成功だけでなく、Jevエラーや不正リクエスト(400/502)も残ります。保存内容は `videoKey, url, title, channel, description先頭500字, clientVersion, category, confidence, 確率3種, Jevレイテンシ, error, httpStatus` です。
+
+```sh
+pnpm d1:migrate:remote
+pnpm deploy
+```
+
+後から見るには、Userscriptと同じ `CLIENT_TOKEN` で `GET /logs` を叩きます。
+
+```sh
+curl -H "Authorization: Bearer $CLIENT_TOKEN" \
+  "https://<worker-name>.<subdomain>.workers.dev/logs?limit=50" | jq .
+```
+
+クエリは `limit`(既定50/最大200)、`offset`、`category=study|entertainment|other`、`videoKey=<動画ID>`、`q=<title/channel/urlの部分一致>` が使えます。例: `.../logs?category=entertainment&limit=20`。
+
 ## セキュリティ上の注意
 
 `CLIENT_TOKEN` はUserscriptから読めるため、完全な秘密ではありません。個人用の入口を絞るためのトークンです。TypeSafeのAPIキーは必ずWorker Secretに置き、GitやUserscriptへ書き込まないでください。
