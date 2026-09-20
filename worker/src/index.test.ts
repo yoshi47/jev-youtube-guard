@@ -5,7 +5,9 @@ import {
   getVideoKey,
   isAuthorized,
   normalizeJevResponse,
+  readClassificationCache,
   toLogDescriptionPrefix,
+  writeClassificationCache,
   writeClassificationLog,
   type Env,
   type JevResponse,
@@ -329,8 +331,13 @@ describe("Classification logging on /classify", () => {
       });
 
       expect(response.status).toBe(200);
-      expect(run).toHaveBeenCalledTimes(1);
-      expect(statements[0]?.params).toEqual(
+      await expect(response.json()).resolves.toMatchObject({ cached: false });
+      // Log write + cache write.
+      expect(run).toHaveBeenCalledTimes(2);
+      const logStatement = statements.find((s) =>
+        s.sql.includes("INSERT INTO classification_logs"),
+      );
+      expect(logStatement?.params).toEqual(
         expect.arrayContaining([
           "abc",
           "https://www.youtube.com/watch?v=abc",
@@ -340,6 +347,12 @@ describe("Classification logging on /classify", () => {
           200,
           "1",
         ]),
+      );
+      const cacheStatement = statements.find((s) =>
+        s.sql.includes("INSERT INTO classification_cache"),
+      );
+      expect(cacheStatement?.params).toEqual(
+        expect.arrayContaining(["abc", "entertainment", 0.88]),
       );
     } finally {
       fetcher.mockRestore();
@@ -360,8 +373,11 @@ describe("Classification logging on /classify", () => {
 
       expect(response.status).toBe(502);
       expect(run).toHaveBeenCalledTimes(1);
-      expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", 502]));
-      const params = statements[0]?.params ?? [];
+      const logStatement = statements.find((s) =>
+        s.sql.includes("INSERT INTO classification_logs"),
+      );
+      expect(logStatement?.params).toEqual(expect.arrayContaining(["abc", 502]));
+      const params = logStatement?.params ?? [];
       // [..., jevLatencyMs, error, httpStatus, policyVersion]
       expect(params[params.length - 3]).toMatch(/Jev request failed/);
     } finally {
@@ -801,8 +817,11 @@ describe("Response hardening", () => {
       });
 
       expect(response.status).toBe(200);
-      expect(run).toHaveBeenCalledTimes(1);
-      expect(statements[0]?.params[3]).toHaveLength(500);
+      expect(run).toHaveBeenCalledTimes(2);
+      const logStatement = statements.find((s) =>
+        s.sql.includes("INSERT INTO classification_logs"),
+      );
+      expect(logStatement?.params[3]).toHaveLength(500);
     } finally {
       fetcher.mockRestore();
     }
@@ -835,5 +854,111 @@ describe("Response hardening", () => {
     expect(youtube.headers.get("Access-Control-Allow-Origin")).toBe("https://www.youtube.com");
     expect(youtube.headers.get("Vary")).toBe("Origin");
     expect(other.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+});
+
+describe("Classification cache", () => {
+  const cachedRow = {
+    video_key: "abc",
+    category: "study",
+    confidence: 0.9,
+    prob_study: 0.9,
+    prob_entertainment: 0.05,
+    prob_other: 0.05,
+    policy_version: "1",
+    updated_at: new Date().toISOString(),
+  };
+
+  it("serves a fresh same-policy entry without calling Jev", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const { db, run } = createMockDb(cachedRow, { results: [] });
+    try {
+      const response = await worker.fetch(classifyRequest(video), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+        DB: db,
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        category: "study",
+        confidence: 0.9,
+        policyVersion: "1",
+        cached: true,
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+      // Cache read does not write; only the request log writes.
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("ignores a stale entry and refreshes it from Jev", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
+    const stale = {
+      ...cachedRow,
+      updated_at: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    const { db } = createMockDb(stale, { results: [] });
+    try {
+      const response = await worker.fetch(classifyRequest(video), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+        DB: db,
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        category: "entertainment",
+        cached: false,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("ignores an entry from a previous policy version", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
+    const { db } = createMockDb({ ...cachedRow, policy_version: "0" }, { results: [] });
+    try {
+      const response = await worker.fetch(classifyRequest(video), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+        DB: db,
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ cached: false });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("readClassificationCache fails open when the table is missing", async () => {
+    const db = {
+      prepare: vi.fn(() => ({
+        bind: () => ({
+          first: vi.fn().mockRejectedValue(new Error("no such table")),
+        }),
+      })),
+    } as unknown as D1Database;
+
+    await expect(readClassificationCache(db, "abc")).resolves.toBeNull();
+  });
+
+  it("writeClassificationCache upserts by video key", async () => {
+    const { db, statements } = createMockDb();
+    await writeClassificationCache(db, video, "abc", {
+      category: "study",
+      probabilities: { study: 0.9, entertainment: 0.05, other: 0.05 },
+      confidence: 0.9,
+    });
+
+    expect(statements[0]?.sql).toContain("INSERT INTO classification_cache");
+    expect(statements[0]?.sql).toContain("ON CONFLICT(video_key)");
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study", 0.9, "1"]));
   });
 });

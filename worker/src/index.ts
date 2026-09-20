@@ -6,6 +6,10 @@ const MAX_TITLE_LENGTH = 500;
 const MAX_CHANNEL_LENGTH = 200;
 const MAX_OFFSET = 100_000;
 const LOG_DESCRIPTION_PREFIX_LENGTH = 500;
+// Server-side Jev result cache: same videoKey + policy reuses the last
+// judgment instead of burning Jev credit. 30 days balances cost against
+// model drift (jev-latest moves under us); POLICY_VERSION bumps force a miss.
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_LOGS_LIMIT = 50;
 const MAX_LOGS_LIMIT = 200;
 
@@ -37,6 +41,7 @@ export interface ClassificationResult {
 
 export interface ClassificationResponse extends ClassificationResult {
   policyVersion: string;
+  cached: boolean;
 }
 
 export interface JevResponse {
@@ -281,6 +286,103 @@ export async function writeFeedbackLog(db: D1Database, entry: FeedbackLogEntry):
     .run();
 }
 
+interface ClassificationCacheRow {
+  video_key: string;
+  category: string;
+  confidence: number | null;
+  prob_study: number | null;
+  prob_entertainment: number | null;
+  prob_other: number | null;
+  policy_version: string;
+  updated_at: string;
+}
+
+export async function readClassificationCache(
+  db: D1Database,
+  videoKey: string,
+): Promise<ClassificationResult | null> {
+  if (!videoKey) return null;
+  let row: ClassificationCacheRow | null;
+  try {
+    row = await db
+      .prepare(
+        `SELECT video_key, category, confidence,
+                prob_study, prob_entertainment, prob_other,
+                policy_version, updated_at
+           FROM classification_cache
+          WHERE video_key = ?`,
+      )
+      .bind(videoKey)
+      .first<ClassificationCacheRow>();
+  } catch {
+    // Table missing (pre-migration DB) or D1 hiccup: fail open to Jev.
+    return null;
+  }
+  if (!row || row.policy_version !== POLICY_VERSION || !isCategory(row.category)) {
+    return null;
+  }
+  const updatedAt = Date.parse(row.updated_at ?? "");
+  if (Number.isNaN(updatedAt) || Date.now() - updatedAt > CACHE_TTL_MS) {
+    return null;
+  }
+  if (typeof row.confidence !== "number" || !Number.isFinite(row.confidence)) {
+    return null;
+  }
+  return {
+    category: row.category,
+    probabilities: {
+      study: toProbability(row.prob_study),
+      entertainment: toProbability(row.prob_entertainment),
+      other: toProbability(row.prob_other),
+    },
+    confidence: row.confidence,
+  };
+}
+
+export async function writeClassificationCache(
+  db: D1Database,
+  video: VideoMetadata,
+  videoKey: string,
+  result: ClassificationResult,
+): Promise<void> {
+  if (!videoKey) return;
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      `INSERT INTO classification_cache
+         (video_key, url, title, channel, category, confidence,
+          prob_study, prob_entertainment, prob_other,
+          policy_version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(video_key) DO UPDATE SET
+         url = excluded.url,
+         title = excluded.title,
+         channel = excluded.channel,
+         category = excluded.category,
+         confidence = excluded.confidence,
+         prob_study = excluded.prob_study,
+         prob_entertainment = excluded.prob_entertainment,
+         prob_other = excluded.prob_other,
+         policy_version = excluded.policy_version,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(
+      videoKey,
+      video.url,
+      video.title,
+      video.channel,
+      result.category,
+      result.confidence,
+      result.probabilities.study,
+      result.probabilities.entertainment,
+      result.probabilities.other,
+      POLICY_VERSION,
+      now,
+      now,
+    )
+    .run();
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -375,10 +477,38 @@ async function handleClassify(
   }
 
   const startedAt = Date.now();
+  const videoKey = getVideoKey(video.url);
+
+  if (videoKey && env.DB) {
+    const cached = await readClassificationCache(env.DB, videoKey);
+    if (cached) {
+      const response: ClassificationResponse = {
+        ...cached,
+        policyVersion: POLICY_VERSION,
+        cached: true,
+      };
+      console.log("jev_classification", {
+        videoKey,
+        title: video.title,
+        channel: video.channel,
+        clientVersion: video.clientVersion ?? "unknown",
+        category: cached.category,
+        confidence: cached.confidence,
+        policyVersion: POLICY_VERSION,
+        cached: true,
+      });
+      await flushLog(logSuccess(env, video, videoKey, cached, Date.now() - startedAt), ctx);
+      return json(response, 200, request);
+    }
+  }
+
   try {
     const result = await classifyVideo(video, env.TYPESAFE_API_KEY);
-    const videoKey = getVideoKey(video.url);
-    const response: ClassificationResponse = { ...result, policyVersion: POLICY_VERSION };
+    const response: ClassificationResponse = {
+      ...result,
+      policyVersion: POLICY_VERSION,
+      cached: false,
+    };
     console.log("jev_classification", {
       videoKey,
       title: video.title,
@@ -387,12 +517,26 @@ async function handleClassify(
       category: result.category,
       confidence: result.confidence,
       policyVersion: POLICY_VERSION,
+      cached: false,
     });
-    await flushLog(logSuccess(env, video, videoKey, result, Date.now() - startedAt), ctx);
+    await flushLog(
+      (async () => {
+        await logSuccess(env, video, videoKey, result, Date.now() - startedAt);
+        if (env.DB) {
+          try {
+            await writeClassificationCache(env.DB, video, videoKey, result);
+          } catch (error) {
+            console.error("jev_cache_write_error", {
+              error: error instanceof Error ? error.message : "Unknown error",
+            });
+          }
+        }
+      })(),
+      ctx,
+    );
     return json(response, 200, request);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    const videoKey = getVideoKey(video.url);
     console.error("jev_classification_error", {
       videoKey,
       title: video.title,
