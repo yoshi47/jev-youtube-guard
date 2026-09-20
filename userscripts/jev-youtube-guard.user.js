@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.8.1
+// @version      0.8.2
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,7 +11,7 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.8.1";
+  const SCRIPT_VERSION = "0.8.2";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -92,17 +92,30 @@
     // Debounced: a burst of pushStates becomes one evaluation.
     const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
-    history.pushState = function (...args) {
-      const result = originalPushState.apply(this, args);
-      scheduleEvaluate();
-      return result;
-    };
-    history.replaceState = function (...args) {
-      const result = originalReplaceState.apply(this, args);
-      scheduleEvaluate();
-      return result;
-    };
+    try {
+      history.pushState = function (...args) {
+        const result = originalPushState.apply(this, args);
+        scheduleEvaluate();
+        return result;
+      };
+      history.replaceState = function (...args) {
+        const result = originalReplaceState.apply(this, args);
+        scheduleEvaluate();
+        return result;
+      };
+    } catch {
+      // Another extension may have frozen history: fall back to YouTube events.
+      dbg("history wrap failed, relying on YouTube events");
+    }
     window.addEventListener("hashchange", () => {
+      scheduleEvaluate();
+    });
+    // Another tab changed an allow-override: drop the pinned video so this tab
+    // re-reads localStorage instead of trusting activeVideoKey.
+    window.addEventListener("storage", (event) => {
+      if (!event.key || !event.key.startsWith(OVERRIDE_PREFIX)) return;
+      if (event.key.slice(OVERRIDE_PREFIX.length) !== activeVideoKey) return;
+      activeVideoKey = "";
       scheduleEvaluate();
     });
   }
@@ -175,7 +188,7 @@
     dbg("cache miss, reading metadata");
 
     const metaStartedAt = Date.now();
-    const metadata = await readVideoMetadata(videoKey);
+    const metadata = await readVideoMetadata(videoKey, () => currentToken === runToken);
     if (currentToken !== runToken) return;
 
     if (!metadata) {
@@ -354,19 +367,31 @@
     }
   }
 
-  async function readVideoMetadata(videoKey) {
+  async function readVideoMetadata(videoKey, isActive) {
+    const active = typeof isActive === "function" ? isActive : () => true;
     const deadline = Date.now() + 10_000;
     let attempts = 0;
     let htmlFallback = null;
     // Race DOM against same-origin HTML from the start: on m.youtube.com the
     // DOM path usually loses, so waiting 3s before fetching just adds latency.
-    void fetchHtmlMetadata(videoKey).then((result) => {
+    // The fetch is aborted on timeout or when a newer video takes over.
+    const htmlController = new AbortController();
+    const htmlTimeoutId = setTimeout(() => htmlController.abort(), 8000);
+    void fetchHtmlMetadata(videoKey, htmlController.signal).then((result) => {
+      clearTimeout(htmlTimeoutId);
+      if (!active()) return;
       htmlFallback = result;
       if (result)
         dbg(`html fetch ready: title=${result.title.length}ch channel=${result.channel.length}ch`);
       else dbg("html fetch empty");
     });
     while (Date.now() < deadline) {
+      // A newer navigation already owns the guard: stop burning cycles.
+      if (!active()) {
+        clearTimeout(htmlTimeoutId);
+        htmlController.abort();
+        return null;
+      }
       attempts++;
       const player = getPlayerDetails();
       const title =
@@ -435,8 +460,11 @@
           `waiting metadata (${attempts}): title=${title.length}ch channel=${channel.length}ch player=${player.found ? "y" : "n"} html=${htmlFallback ? "y" : "n"}`,
         );
       }
+      // Polling loop: each wait must finish before the next DOM read.
+      // oxlint-disable-next-line no-await-in-loop
       await delay(250);
     }
+    clearTimeout(htmlTimeoutId);
     dbg("metadata timeout");
     return null;
   }
@@ -444,10 +472,14 @@
   // Same-origin fetch of the watch HTML. Server-rendered HTML carries the
   // correct og:title / ownerChannelName even during SPA navigations where
   // the live DOM and <head> meta are stale or mobile-structured.
-  async function fetchHtmlMetadata(videoKey) {
+  async function fetchHtmlMetadata(videoKey, signal) {
     try {
       const url = `${location.origin}/watch?v=${encodeURIComponent(videoKey)}`;
-      const response = await fetch(url, { credentials: "same-origin" });
+      const response = await fetch(url, {
+        credentials: "same-origin",
+        headers: { Accept: "text/html" },
+        signal,
+      });
       if (!response.ok) return null;
       const html = await response.text();
       const titleRaw = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/)?.[1] ?? "";
@@ -606,7 +638,6 @@
     overlay.style.padding = blocked ? "24px" : "8px 12px";
     overlay.style.borderRadius = blocked ? "0" : "8px";
     overlay.style.boxShadow = blocked ? "none" : "0 2px 12px rgba(0, 0, 0, 0.18)";
-    overlay.style.width = blocked ? "auto" : "auto";
     overlay.style.background = blocked ? "rgba(255, 255, 255, 0.96)" : "rgba(255, 255, 255, 0.94)";
     overlay.style.pointerEvents = blocked ? "auto" : "none";
 

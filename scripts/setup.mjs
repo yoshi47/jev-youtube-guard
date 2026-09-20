@@ -80,31 +80,27 @@ function putSecret(name, value) {
   }
 }
 
-/** JSONC を素朴に剥がして parse (このリポジトリの wrangler.jsonc 用)。 */
-function parseJsonc(text) {
-  const stripped = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "$1");
-  return JSON.parse(stripped);
-}
-
-function readWranglerConfig() {
+/** wrangler.jsonc はコメント付きJSONCなので parse せず、必要な1行だけ正規表現で扱う。 */
+function readWranglerText() {
   if (!existsSync(WRANGLER_JSONC)) fail("wrangler.jsonc が見つかりません。");
-  const text = readFileSync(WRANGLER_JSONC, "utf-8");
-  let config;
-  try {
-    config = parseJsonc(text);
-  } catch {
-    fail("wrangler.jsonc の解析に失敗しました。");
+  return readFileSync(WRANGLER_JSONC, "utf-8");
+}
+
+function extractD1Id(text) {
+  const match = text.match(/"database_id"\s*:\s*"([^"]*)"/);
+  return match?.[1] ?? "";
+}
+
+/** database_id の値だけを置換し、コメントや書式はそのまま残す。 */
+function patchWranglerD1Id(d1Id) {
+  const text = readWranglerText();
+  const pattern = /("database_id"\s*:\s*")[^"]*(")/;
+  if (!pattern.test(text)) {
+    fail(
+      "wrangler.jsonc に database_id が見つかりません。ファイル構成が変わっている可能性があります。",
+    );
   }
-  return config;
-}
-
-function writeWranglerConfig(config) {
-  writeFileSync(WRANGLER_JSONC, `${JSON.stringify(config, null, 2)}\n`);
-}
-
-function currentD1Id(config) {
-  const entry = config?.d1_databases?.[0];
-  return typeof entry?.database_id === "string" ? entry.database_id : "";
+  writeFileSync(WRANGLER_JSONC, text.replace(pattern, `$1${d1Id}$2`));
 }
 
 function findD1ByName() {
@@ -141,7 +137,7 @@ function createD1() {
 function readUserscriptToken() {
   if (!existsSync(USERSCRIPT)) fail("userscripts/jev-youtube-guard.user.js が見つかりません。");
   const text = readFileSync(USERSCRIPT, "utf-8");
-  const match = text.match(/clientToken:\s*"([^"]*)"/);
+  const match = text.match(/^\s*clientToken:\s*"([^"]*)"/m);
   const token = match?.[1] ?? "";
   if (isPlaceholderToken(token)) return "";
   return token.length >= 16 ? token : "";
@@ -158,11 +154,12 @@ function isPlaceholderToken(token) {
 
 function patchUserscript(baseUrl, clientToken) {
   const text = readFileSync(USERSCRIPT, "utf-8");
+  // Anchored to the line start so `endpoint:` never matches `allowEndpoint:`.
   const updates = [
-    [/endpoint:\s*"[^"]*"/, `endpoint: "${baseUrl}/classify"`],
-    [/allowEndpoint:\s*"[^"]*"/, `allowEndpoint: "${baseUrl}/allow"`],
-    [/feedbackEndpoint:\s*"[^"]*"/, `feedbackEndpoint: "${baseUrl}/feedback"`],
-    [/clientToken:\s*"[^"]*"/, `clientToken: "${clientToken}"`],
+    [/^(\s*)endpoint:\s*"[^"]*"/m, `$1endpoint: "${baseUrl}/classify"`],
+    [/^(\s*)allowEndpoint:\s*"[^"]*"/m, `$1allowEndpoint: "${baseUrl}/allow"`],
+    [/^(\s*)feedbackEndpoint:\s*"[^"]*"/m, `$1feedbackEndpoint: "${baseUrl}/feedback"`],
+    [/^(\s*)clientToken:\s*"[^"]*"/m, `$1clientToken: "${clientToken}"`],
   ];
   let updated = text;
   for (const [pattern, update] of updates) {
@@ -197,9 +194,8 @@ async function main() {
   }
   log("[setup] Cloudflare ログインOK。");
 
-  // 2. D1 解決 → wrangler.jsonc 更新
-  const config = readWranglerConfig();
-  let d1Id = currentD1Id(config);
+  // 2. D1 解決 → wrangler.jsonc 更新 (database_id の1行だけを書き換え、コメントは残す)
+  let d1Id = extractD1Id(readWranglerText());
   if (UUID_RE.test(d1Id)) {
     log(`[setup] D1 は wrangler.jsonc の設定を再利用します (${d1Id})。`);
   } else {
@@ -218,14 +214,7 @@ async function main() {
         log(`[setup] D1 を作成しました (${d1Id})。`);
       }
     }
-    config.d1_databases = config.d1_databases ?? [];
-    config.d1_databases[0] = {
-      binding: "DB",
-      database_name: DB_NAME,
-      database_id: d1Id,
-      migrations_dir: "worker/migrations",
-    };
-    writeWranglerConfig(config);
+    patchWranglerD1Id(d1Id);
     log("[setup] wrangler.jsonc の database_id を更新しました。");
   }
 
@@ -243,6 +232,8 @@ async function main() {
     fail("非対話モードでは環境変数 TYPESAFE_API_KEY が必須です。");
   }
   while (!typesafeKey) {
+    // Sequential prompts must run one at a time.
+    // oxlint-disable-next-line no-await-in-loop
     const answer = await prompt("TypeSafe の APIキー (TYPESAFE_API_KEY)");
     if (answer) typesafeKey = answer;
     else log("  空では登録できません。");
@@ -292,6 +283,8 @@ async function main() {
     );
   }
   while (!baseUrl || !WORKER_URL_RE.test(baseUrl)) {
+    // Sequential prompts must run one at a time.
+    // oxlint-disable-next-line no-await-in-loop
     const answer = await prompt(
       "Worker のベースURL (例: https://xxx.yyy.workers.dev)",
       deployedUrl.replace(/\/$/, ""),

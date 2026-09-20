@@ -12,10 +12,10 @@ importers:
         specifier: ^5.20260823.1
         version: 5.20260919.1
       oxfmt:
-        specifier: latest
+        specifier: 0.68.0
         version: 0.68.0
       oxlint:
-        specifier: latest
+        specifier: 1.83.0
         version: 1.83.0
       typescript:
         specifier: ^5.7.2

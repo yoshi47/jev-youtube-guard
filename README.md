@@ -122,7 +122,6 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
   "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/feedback?limit=50" | jq .
 ```
 
-なおマイグレーション番号は `0005` です(`0004` はローカル実験のチャンネルブロック用に予約ずみ)。
 
 ## デバッグ
 
@@ -132,7 +131,6 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 2. URLに `&jevdebug=1` を付けると左下に緑のデバッグパネルが出ます(全動画で常に出す場合はUserscriptの `DEBUG_FORCE_ON` を `true` にします)
 3. 画面左下の緑のデバッグパネルに出る行で止まっている箇所を特定する:
    - `init` 自体が出ない → 拡張機能がそのページで動いていない(@match外、無効化、アクセス未許可)
-   - `videoKey=` の次で止まる → 0.2.0以前のバグ(localStorage例外で死ぬ)。0.2.1以降に更新する
    - `metadata not found` → タイトル/チャンネル名が取れていない(常に許可になる)
    - `classify failed` → Workerへの通信失敗(401ならトークン不一致)
    - `decision=ALLOW` → 判定は動いているがブロック条件(`entertainment` かつ信頼度0.6以上)に当たっていない

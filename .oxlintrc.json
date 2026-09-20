@@ -4,6 +4,6 @@
   "categories": { "correctness": "error", "suspicious": "warn", "perf": "warn" },
   "env": { "browser": true, "es2024": true },
   "rules": {
-    "no-console": ["warn", { "allow": ["warn", "error"] }]
+    "no-console": ["warn", { "allow": ["warn", "error", "log"] }]
   }
 }

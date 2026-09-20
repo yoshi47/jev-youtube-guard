@@ -514,8 +514,8 @@ function allowRequest(body: unknown, token = "Bearer client") {
 }
 
 describe("POST /allow", () => {
-  it("rejects a request without the client token and logs it", async () => {
-    const { db, run, statements } = createMockDb();
+  it("rejects a request without the client token without touching classification logs", async () => {
+    const { db, run } = createMockDb();
     const response = await worker.fetch(allowRequest({ videoKey: "abc" }, "Bearer wrong"), {
       TYPESAFE_API_KEY: "jev-key",
       CLIENT_TOKEN: "client",
@@ -523,8 +523,7 @@ describe("POST /allow", () => {
     });
 
     expect(response.status).toBe(401);
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(statements[0]?.params).toEqual(expect.arrayContaining(["Unauthorized", 401]));
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("returns 503 when no log store is configured", async () => {
@@ -631,8 +630,8 @@ function feedbackRequest(body: unknown, token = "Bearer client") {
 }
 
 describe("POST /feedback", () => {
-  it("rejects a request without the client token and logs it", async () => {
-    const { db, run, statements } = createMockDb();
+  it("rejects a request without the client token without touching classification logs", async () => {
+    const { db, run } = createMockDb();
     const response = await worker.fetch(feedbackRequest({ videoKey: "abc" }, "Bearer wrong"), {
       TYPESAFE_API_KEY: "jev-key",
       CLIENT_TOKEN: "client",
@@ -640,8 +639,7 @@ describe("POST /feedback", () => {
     });
 
     expect(response.status).toBe(401);
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(statements[0]?.params).toEqual(expect.arrayContaining(["Unauthorized", 401]));
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("returns 503 when no log store is configured", async () => {
@@ -759,5 +757,83 @@ describe("GET /feedback", () => {
         expect.objectContaining({ videoKey: "abc", kind: "false-negative", category: "study" }),
       ],
     });
+  });
+});
+
+describe("Response hardening", () => {
+  it("rejects a non-numeric Jev confidence instead of storing it", () => {
+    expect(() =>
+      normalizeJevResponse({
+        answers: {
+          category: { choice: "study", probabilities: {}, confidence: Number.NaN },
+        },
+      }),
+    ).toThrow("Invalid Jev confidence");
+  });
+
+  it("defaults missing Jev probabilities to 0", () => {
+    expect(
+      normalizeJevResponse({
+        answers: {
+          category: { choice: "study", probabilities: {}, confidence: 0.7 },
+        },
+      }),
+    ).toMatchObject({
+      category: "study",
+      probabilities: { study: 0, entertainment: 0, other: 0 },
+    });
+  });
+
+  it("sends an abort signal so a hung Jev cannot hold the Worker forever", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jevSuccessResponse());
+    await classifyVideo({ ...video }, "jev-key", fetcher);
+    expect(fetcher.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("truncates overlong titles before logging", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(jevSuccessResponse());
+    const { db, run, statements } = createMockDb();
+    try {
+      const response = await worker.fetch(classifyRequest({ ...video, title: "x".repeat(600) }), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+        DB: db,
+      });
+
+      expect(response.status).toBe(200);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(statements[0]?.params[3]).toHaveLength(500);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("escapes LIKE wildcards in the log search query", async () => {
+    const { db, statements } = createMockDb({ total: 0 }, { results: [] });
+    const response = await worker.fetch(
+      new Request("https://guard.example/logs?q=100%25", {
+        headers: { Authorization: "Bearer client" },
+      }),
+      { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
+    );
+
+    expect(response.status).toBe(200);
+    expect(statements[0]?.sql).toContain("ESCAPE");
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["%100\\%%"]));
+  });
+
+  it("echoes YouTube origins and keeps the wildcard otherwise", async () => {
+    const env = { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" } as Env;
+    const youtube = await worker.fetch(
+      new Request("https://guard.example/logs", {
+        headers: { Origin: "https://www.youtube.com" },
+      }),
+      env,
+    );
+    const other = await worker.fetch(new Request("https://guard.example/logs"), env);
+
+    expect(youtube.headers.get("Access-Control-Allow-Origin")).toBe("https://www.youtube.com");
+    expect(youtube.headers.get("Vary")).toBe("Origin");
+    expect(other.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 });

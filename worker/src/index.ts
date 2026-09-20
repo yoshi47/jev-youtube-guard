@@ -1,5 +1,10 @@
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+const JEV_TIMEOUT_MS = 10_000;
 const MAX_DESCRIPTION_LENGTH = 8_000;
+const MAX_URL_LENGTH = 2_000;
+const MAX_TITLE_LENGTH = 500;
+const MAX_CHANNEL_LENGTH = 200;
+const MAX_OFFSET = 100_000;
 const LOG_DESCRIPTION_PREFIX_LENGTH = 500;
 const DEFAULT_LOGS_LIMIT = 50;
 const MAX_LOGS_LIMIT = 200;
@@ -96,12 +101,27 @@ export interface FeedbackLogEntry {
   note: string;
 }
 
-const corsHeaders = {
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Origin": "*",
-  "Content-Type": "application/json; charset=utf-8",
-};
+const YOUTUBE_HOSTNAMES = new Set(["www.youtube.com", "youtube.com", "m.youtube.com"]);
+
+// The userscript calls us cross-origin from youtube.com. Echo the origin only
+// for YouTube hosts; anything else (curl, etc.) keeps the wildcard.
+function corsHeadersFor(request: Request): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Origin": "*",
+  };
+  try {
+    const origin = request.headers.get("Origin") ?? "";
+    if (YOUTUBE_HOSTNAMES.has(new URL(origin).hostname)) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Vary"] = "Origin";
+    }
+  } catch {
+    // No (or unparseable) Origin header: keep the wildcard.
+  }
+  return headers;
+}
 
 export function isAuthorized(authorization: string | undefined, clientToken: string): boolean {
   return authorization === `Bearer ${clientToken}`;
@@ -131,15 +151,23 @@ export function normalizeJevResponse(response: JevResponse): ClassificationResul
     throw new Error("Invalid Jev category");
   }
 
+  if (typeof answer.confidence !== "number" || !Number.isFinite(answer.confidence)) {
+    throw new Error("Invalid Jev confidence");
+  }
+
   return {
     category: answer.choice,
     probabilities: {
-      study: answer.probabilities.study ?? 0,
-      entertainment: answer.probabilities.entertainment ?? 0,
-      other: answer.probabilities.other ?? 0,
+      study: toProbability(answer.probabilities?.study),
+      entertainment: toProbability(answer.probabilities?.entertainment),
+      other: toProbability(answer.probabilities?.other),
     },
     confidence: answer.confidence,
   };
+}
+
+function toProbability(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
 export async function classifyVideo(
@@ -154,6 +182,7 @@ export async function classifyVideo(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(buildJevRequest(video)),
+    signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -255,7 +284,7 @@ export async function writeFeedbackLog(db: D1Database, entry: FeedbackLogEntry):
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { headers: corsHeadersFor(request) });
     }
 
     const url = new URL(request.url);
@@ -270,14 +299,16 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/allow") {
       if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-        return unauthorized(env, ctx);
+        // Auth failures outside /classify are not written to classification_logs
+        // so the classification history stays free of unrelated noise.
+        return json({ error: "Unauthorized" }, 401, request);
       }
       return handleAllow(request, env, ctx);
     }
 
     if (request.method === "POST" && url.pathname === "/feedback") {
       if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-        return unauthorized(env, ctx);
+        return json({ error: "Unauthorized" }, 401, request);
       }
       return handleFeedback(request, env, ctx);
     }
@@ -287,18 +318,18 @@ export default {
     }
 
     if (request.method !== "POST" || url.pathname !== "/classify") {
-      return json({ error: "Not found" }, 404);
+      return json({ error: "Not found" }, 404, request);
     }
 
     if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-      return unauthorized(env, ctx);
+      return unauthorized(request, env, ctx);
     }
 
     return handleClassify(request, env, ctx);
   },
 };
 
-async function unauthorized(env: Env, ctx?: ExecutionContext): Promise<Response> {
+async function unauthorized(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   await flushLog(
     logFailure(env, {
       videoKey: "",
@@ -312,7 +343,7 @@ async function unauthorized(env: Env, ctx?: ExecutionContext): Promise<Response>
     }),
     ctx,
   );
-  return json({ error: "Unauthorized" }, 401);
+  return json({ error: "Unauthorized" }, 401, request);
 }
 
 async function handleClassify(
@@ -340,7 +371,7 @@ async function handleClassify(
       ctx,
     );
     console.error("jev_classification_error", { error: message, httpStatus: status });
-    return json({ error: message }, status);
+    return json({ error: message }, status, request);
   }
 
   const startedAt = Date.now();
@@ -348,7 +379,7 @@ async function handleClassify(
     const result = await classifyVideo(video, env.TYPESAFE_API_KEY);
     const videoKey = getVideoKey(video.url);
     const response: ClassificationResponse = { ...result, policyVersion: POLICY_VERSION };
-    console.warn("jev_classification", {
+    console.log("jev_classification", {
       videoKey,
       title: video.title,
       channel: video.channel,
@@ -358,7 +389,7 @@ async function handleClassify(
       policyVersion: POLICY_VERSION,
     });
     await flushLog(logSuccess(env, video, videoKey, result, Date.now() - startedAt), ctx);
-    return json(response, 200);
+    return json(response, 200, request);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     const videoKey = getVideoKey(video.url);
@@ -381,30 +412,30 @@ async function handleClassify(
       }),
       ctx,
     );
-    const status = message.startsWith("Invalid request") ? 400 : 502;
-    return json({ error: message }, status);
+    // classifyVideo never throws "Invalid request": any failure here is upstream.
+    return json({ error: message }, 502, request);
   }
 }
 
 async function handleGetLogs(request: Request, env: Env): Promise<Response> {
   if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-    return json({ error: "Unauthorized" }, 401);
+    return json({ error: "Unauthorized" }, 401, request);
   }
 
   if (!env.DB) {
-    return json({ error: "Log store is not configured" }, 503);
+    return json({ error: "Log store is not configured" }, 503, request);
   }
 
   const url = new URL(request.url);
   const limit = clampInt(url.searchParams.get("limit"), DEFAULT_LOGS_LIMIT, 1, MAX_LOGS_LIMIT);
-  const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, MAX_OFFSET);
   const category = url.searchParams.get("category") ?? "";
   const policyVersion = url.searchParams.get("policyVersion") ?? "";
   const videoKey = url.searchParams.get("videoKey") ?? "";
   const query = url.searchParams.get("q") ?? "";
 
   if (category !== "" && !isCategory(category)) {
-    return json({ error: "Invalid category filter" }, 400);
+    return json({ error: "Invalid category filter" }, 400, request);
   }
 
   const conditions: string[] = [];
@@ -447,28 +478,29 @@ async function handleGetLogs(request: Request, env: Env): Promise<Response> {
         offset,
       },
       200,
+      request,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("jev_logs_error", { error: message });
-    return json({ error: "Failed to read logs" }, 500);
+    return json({ error: "Failed to read logs" }, 500, request);
   }
 }
 
 async function handleAllow(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   if (!env.DB) {
-    return json({ error: "Log store is not configured" }, 503);
+    return json({ error: "Log store is not configured" }, 503, request);
   }
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return json({ error: "Invalid request JSON" }, 400);
+    return json({ error: "Invalid request JSON" }, 400, request);
   }
 
   if (!isRecord(body)) {
-    return json({ error: "Invalid request body" }, 400);
+    return json({ error: "Invalid request body" }, 400, request);
   }
 
   const videoKey = stringField(body, "videoKey");
@@ -478,7 +510,7 @@ async function handleAllow(request: Request, env: Env, ctx?: ExecutionContext): 
   const clientVersion = stringField(body, "clientVersion");
 
   if (!videoKey && !url) {
-    return json({ error: "Invalid override payload" }, 400);
+    return json({ error: "Invalid override payload" }, 400, request);
   }
 
   await flushLog(
@@ -499,21 +531,21 @@ async function handleAllow(request: Request, env: Env, ctx?: ExecutionContext): 
     })(),
     ctx,
   );
-  return json({ ok: true }, 200);
+  return json({ ok: true }, 200, request);
 }
 
 async function handleGetOverrides(request: Request, env: Env): Promise<Response> {
   if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-    return json({ error: "Unauthorized" }, 401);
+    return json({ error: "Unauthorized" }, 401, request);
   }
 
   if (!env.DB) {
-    return json({ error: "Log store is not configured" }, 503);
+    return json({ error: "Log store is not configured" }, 503, request);
   }
 
   const url = new URL(request.url);
   const limit = clampInt(url.searchParams.get("limit"), DEFAULT_LOGS_LIMIT, 1, MAX_LOGS_LIMIT);
-  const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, MAX_OFFSET);
   const search = buildSearchFilter(
     url.searchParams.get("videoKey") ?? "",
     url.searchParams.get("q") ?? "",
@@ -541,11 +573,12 @@ async function handleGetOverrides(request: Request, env: Env): Promise<Response>
         offset,
       },
       200,
+      request,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("jev_logs_error", { error: message });
-    return json({ error: "Failed to read logs" }, 500);
+    return json({ error: "Failed to read logs" }, 500, request);
   }
 }
 
@@ -555,18 +588,18 @@ async function handleFeedback(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   if (!env.DB) {
-    return json({ error: "Log store is not configured" }, 503);
+    return json({ error: "Log store is not configured" }, 503, request);
   }
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return json({ error: "Invalid request JSON" }, 400);
+    return json({ error: "Invalid request JSON" }, 400, request);
   }
 
   if (!isRecord(body)) {
-    return json({ error: "Invalid request body" }, 400);
+    return json({ error: "Invalid request body" }, 400, request);
   }
 
   const videoKey = stringField(body, "videoKey");
@@ -580,7 +613,7 @@ async function handleFeedback(
   const confidence = parseConfidence(body["confidence"]);
 
   if (!videoKey && !url) {
-    return json({ error: "Invalid feedback payload" }, 400);
+    return json({ error: "Invalid feedback payload" }, 400, request);
   }
 
   // Log-only: never auto-blocks. Triage happens by reading GET /feedback.
@@ -606,21 +639,21 @@ async function handleFeedback(
     })(),
     ctx,
   );
-  return json({ ok: true }, 200);
+  return json({ ok: true }, 200, request);
 }
 
 async function handleGetFeedback(request: Request, env: Env): Promise<Response> {
   if (!isAuthorized(request.headers.get("Authorization") ?? undefined, env.CLIENT_TOKEN)) {
-    return json({ error: "Unauthorized" }, 401);
+    return json({ error: "Unauthorized" }, 401, request);
   }
 
   if (!env.DB) {
-    return json({ error: "Log store is not configured" }, 503);
+    return json({ error: "Log store is not configured" }, 503, request);
   }
 
   const url = new URL(request.url);
   const limit = clampInt(url.searchParams.get("limit"), DEFAULT_LOGS_LIMIT, 1, MAX_LOGS_LIMIT);
-  const offset = clampInt(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, MAX_OFFSET);
   const search = buildSearchFilter(
     url.searchParams.get("videoKey") ?? "",
     url.searchParams.get("q") ?? "",
@@ -649,11 +682,12 @@ async function handleGetFeedback(request: Request, env: Env): Promise<Response> 
         offset,
       },
       200,
+      request,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("jev_logs_error", { error: message });
-    return json({ error: "Failed to read logs" }, 500);
+    return json({ error: "Failed to read logs" }, 500, request);
   }
 }
 
@@ -677,11 +711,17 @@ function buildSearchFilter(
     bindings.push(videoKey);
   }
   if (query !== "") {
-    conditions.push("(title LIKE ? OR channel LIKE ? OR url LIKE ?)");
-    const pattern = `%${query}%`;
+    conditions.push(
+      "(title LIKE ? ESCAPE '\\' OR channel LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')",
+    );
+    const pattern = `%${escapeLike(query)}%`;
     bindings.push(pattern, pattern, pattern);
   }
   return { conditions, bindings };
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 interface OverrideLogRow {
@@ -893,11 +933,14 @@ async function parseVideoMetadata(request: Request): Promise<VideoMetadata> {
   if (!url || !title || !channel) {
     throw new Error("Invalid request metadata");
   }
+  if (url.length > MAX_URL_LENGTH) {
+    throw new Error("Invalid request metadata");
+  }
 
   return {
     url,
-    title,
-    channel,
+    title: title.slice(0, MAX_TITLE_LENGTH),
+    channel: channel.slice(0, MAX_CHANNEL_LENGTH),
     description: description.slice(0, MAX_DESCRIPTION_LENGTH),
     clientVersion: clientVersion || undefined,
   };
@@ -911,9 +954,14 @@ function stringField(body: Record<string, unknown>, key: string): string {
   return typeof body[key] === "string" ? body[key].trim() : "";
 }
 
-function json(body: unknown, status: number): Response {
+function json(body: unknown, status: number, request: Request): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: corsHeaders,
+    headers: {
+      ...corsHeadersFor(request),
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
   });
 }
