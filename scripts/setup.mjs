@@ -253,11 +253,13 @@ async function main() {
     if (NON_INTERACTIVE) {
       clientToken = randomBytes(32).toString("hex");
     } else {
-      const answer = await prompt(
-        "CLIENT_TOKEN (空Enterで自動生成)",
-        randomBytes(32).toString("hex"),
-      );
-      clientToken = answer;
+      const answer = await prompt("CLIENT_TOKEN (空Enterで自動生成)");
+      if (answer) {
+        clientToken = answer;
+      } else {
+        clientToken = randomBytes(32).toString("hex");
+        log(" CLIENT_TOKEN を生成しました。");
+      }
     }
   }
 
