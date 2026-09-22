@@ -42,9 +42,18 @@ describe("buildJevRequest", () => {
           type: "choice",
           instructions: "このコンテンツの主目的は何ですか？",
           criteria: {
-            study: "学習・教育・仕事・技術習得",
-            entertainment: "娯楽・暇つぶし",
-            other: "それ以外",
+            study_tech: "プログラミング・技術解説・仕事術・開発",
+            study_exam: "受験・資格勉強・語学学習",
+            study_culture:
+              "体系的な教養・科学・歴史・ドキュメンタリ・大学講義レベルの解説（雑学・トリビア・豆知識などの暇つぶしは除く）",
+            ent_game: "ゲーム実況・配信・eスポーツ・攻略",
+            ent_variety:
+              "バラエティ・お笑い・切り抜き・リアクション・ドラマ/アニメ・Vlog雑談・雑学・トリビア・豆知識",
+            ent_music: "音楽・MV・ライブ・歌ってみた・演奏",
+            ent_sports: "スポーツ観戦・ハイライト・実況",
+            info_news: "ニュース・時事・速報・政治・経済",
+            useful_review: "ガジェット・商品レビュー・HowTo・DIY・比較検証",
+            other_other: "上記のいずれにも当てはまらない",
           },
         },
       },
@@ -57,17 +66,51 @@ describe("normalizeJevResponse", () => {
     const response: JevResponse = {
       answers: {
         category: {
-          choice: "entertainment",
-          probabilities: { study: 0.01, entertainment: 0.98, other: 0.01 },
+          choice: "ent_variety",
+          probabilities: {
+            study_tech: 0.01,
+            study_exam: 0.01,
+            study_culture: 0.01,
+            ent_game: 0.01,
+            ent_variety: 0.94,
+            ent_music: 0.01,
+            ent_sports: 0.01,
+            info_news: 0.01,
+            useful_review: 0.01,
+            other_other: 0.01,
+          },
           confidence: 0.92,
         },
       },
     };
 
     expect(normalizeJevResponse(response)).toEqual({
-      category: "entertainment",
-      probabilities: { study: 0.01, entertainment: 0.98, other: 0.01 },
+      category: "ent_variety",
+      probabilities: {
+        study_tech: 0.01,
+        study_exam: 0.01,
+        study_culture: 0.01,
+        ent_game: 0.01,
+        ent_variety: 0.94,
+        ent_music: 0.01,
+        ent_sports: 0.01,
+        info_news: 0.01,
+        useful_review: 0.01,
+        other_other: 0.01,
+      },
       confidence: 0.92,
+      probabilitiesJson: JSON.stringify({
+        study_tech: 0.01,
+        study_exam: 0.01,
+        study_culture: 0.01,
+        ent_game: 0.01,
+        ent_variety: 0.94,
+        ent_music: 0.01,
+        ent_sports: 0.01,
+        info_news: 0.01,
+        useful_review: 0.01,
+        other_other: 0.01,
+      }),
     });
   });
 
@@ -93,8 +136,19 @@ describe("classifyVideo", () => {
         JSON.stringify({
           answers: {
             category: {
-              choice: "study",
-              probabilities: { study: 0.9, entertainment: 0.05, other: 0.05 },
+              choice: "study_tech",
+              probabilities: {
+                study_tech: 0.9,
+                study_exam: 0.02,
+                study_culture: 0.02,
+                ent_game: 0.01,
+                ent_variety: 0.01,
+                ent_music: 0.01,
+                ent_sports: 0.01,
+                info_news: 0.01,
+                useful_review: 0.01,
+                other_other: 0.01,
+              },
               confidence: 0.8,
             },
           },
@@ -104,7 +158,7 @@ describe("classifyVideo", () => {
     );
 
     await expect(classifyVideo(video, "jev-key", fetcher)).resolves.toMatchObject({
-      category: "study",
+      category: "study_tech",
       confidence: 0.8,
     });
     expect(fetcher).toHaveBeenCalledWith(
@@ -166,8 +220,19 @@ describe("Worker fetch handler", () => {
         JSON.stringify({
           answers: {
             category: {
-              choice: "entertainment",
-              probabilities: { study: 0.02, entertainment: 0.96, other: 0.02 },
+              choice: "ent_variety",
+              probabilities: {
+                study_tech: 0.01,
+                study_exam: 0.01,
+                study_culture: 0.01,
+                ent_game: 0.01,
+                ent_variety: 0.94,
+                ent_music: 0.01,
+                ent_sports: 0.01,
+                info_news: 0.01,
+                useful_review: 0.01,
+                other_other: 0.01,
+              },
               confidence: 0.88,
             },
           },
@@ -191,9 +256,9 @@ describe("Worker fetch handler", () => {
 
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toMatchObject({
-        category: "entertainment",
+        category: "ent_variety",
         confidence: 0.88,
-        policyVersion: "1",
+        policyVersion: "2",
       });
     } finally {
       fetcher.mockRestore();
@@ -212,10 +277,17 @@ describe("Userscript policy", () => {
     expect(policy.isTargetPage("https://www.youtube.com/results?search_query=math")).toBe(false);
   });
 
-  it("blocks only high-confidence entertainment results", () => {
-    expect(policy.shouldBlock({ category: "entertainment", confidence: 0.6 })).toBe(true);
-    expect(policy.shouldBlock({ category: "entertainment", confidence: 0.59 })).toBe(false);
-    expect(policy.shouldBlock({ category: "study", confidence: 0.99 })).toBe(false);
+  it("blocks only high-confidence blocked categories", () => {
+    expect(policy.shouldBlock({ category: "ent_game", confidence: 0.6 })).toBe(true);
+    expect(policy.shouldBlock({ category: "ent_variety", confidence: 0.6 })).toBe(true);
+    expect(policy.shouldBlock({ category: "ent_sports", confidence: 0.6 })).toBe(true);
+    expect(policy.shouldBlock({ category: "useful_review", confidence: 0.6 })).toBe(true);
+    expect(policy.shouldBlock({ category: "ent_game", confidence: 0.59 })).toBe(false);
+    expect(policy.shouldBlock({ category: "useful_review", confidence: 0.59 })).toBe(false);
+    expect(policy.shouldBlock({ category: "study_tech", confidence: 0.99 })).toBe(false);
+    expect(policy.shouldBlock({ category: "study_culture", confidence: 0.99 })).toBe(false);
+    expect(policy.shouldBlock({ category: "info_news", confidence: 0.99 })).toBe(false);
+    expect(policy.shouldBlock({ category: "ent_music", confidence: 0.99 })).toBe(false);
   });
 
   it("enables debug mode via query, hash, or localStorage flag", () => {
@@ -231,8 +303,19 @@ function jevSuccessResponse() {
     JSON.stringify({
       answers: {
         category: {
-          choice: "entertainment",
-          probabilities: { study: 0.02, entertainment: 0.96, other: 0.02 },
+          choice: "ent_variety",
+          probabilities: {
+            study_tech: 0.01,
+            study_exam: 0.01,
+            study_culture: 0.01,
+            ent_game: 0.01,
+            ent_variety: 0.94,
+            ent_music: 0.01,
+            ent_sports: 0.01,
+            info_news: 0.01,
+            useful_review: 0.01,
+            other_other: 0.01,
+          },
           confidence: 0.88,
         },
       },
@@ -302,7 +385,7 @@ describe("writeClassificationLog", () => {
       channel: "channel",
       descriptionPrefix: "desc",
       clientVersion: "0.1.3",
-      category: "study",
+      category: "study_tech",
       confidence: 0.9,
       probStudy: 0.9,
       probEntertainment: 0.05,
@@ -310,12 +393,26 @@ describe("writeClassificationLog", () => {
       jevLatencyMs: 123,
       error: null,
       httpStatus: 200,
-      policyVersion: "1",
+      policyVersion: "2",
+      probabilitiesJson: JSON.stringify({
+        study_tech: 0.9,
+        study_exam: 0,
+        study_culture: 0,
+        ent_game: 0,
+        ent_variety: 0.05,
+        ent_music: 0,
+        ent_sports: 0,
+        info_news: 0,
+        useful_review: 0,
+        other_other: 0.05,
+      }),
     });
 
     expect(run).toHaveBeenCalledTimes(1);
     expect(statements[0]?.sql).toContain("INSERT INTO classification_logs");
-    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study", 0.9, 200, "1"]));
+    expect(statements[0]?.params).toEqual(
+      expect.arrayContaining(["abc", "study_tech", 0.9, 0.05, 0.05, 200, "2"]),
+    );
   });
 });
 
@@ -342,18 +439,22 @@ describe("Classification logging on /classify", () => {
           "abc",
           "https://www.youtube.com/watch?v=abc",
           "東大入試数学を解説します",
-          "entertainment",
+          "数学解説チャンネル",
+          "大学受験向けの数学講義です",
+          "",
+          "ent_variety",
           0.88,
+          0.01,
+          0.94,
+          0.01,
           200,
-          "1",
+          "2",
         ]),
       );
       const cacheStatement = statements.find((s) =>
         s.sql.includes("INSERT INTO classification_cache"),
       );
-      expect(cacheStatement?.params).toEqual(
-        expect.arrayContaining(["abc", "entertainment", 0.88]),
-      );
+      expect(cacheStatement?.params).toEqual(expect.arrayContaining(["abc", "ent_variety", 0.88]));
     } finally {
       fetcher.mockRestore();
     }
@@ -378,8 +479,9 @@ describe("Classification logging on /classify", () => {
       );
       expect(logStatement?.params).toEqual(expect.arrayContaining(["abc", 502]));
       const params = logStatement?.params ?? [];
-      // [..., jevLatencyMs, error, httpStatus, policyVersion]
-      expect(params[params.length - 3]).toMatch(/Jev request failed/);
+      // [..., jevLatencyMs, error, httpStatus, policyVersion, probabilitiesJson]
+      // error is at index params.length - 4
+      expect(params[params.length - 4]).toMatch(/Jev request failed/);
     } finally {
       fetcher.mockRestore();
     }
@@ -472,7 +574,7 @@ describe("GET /logs", () => {
       channel: "channel",
       description_prefix: "desc",
       client_version: "0.1.3",
-      category: "entertainment",
+      category: "ent_variety",
       confidence: 0.88,
       prob_study: 0.02,
       prob_entertainment: 0.96,
@@ -480,11 +582,23 @@ describe("GET /logs", () => {
       jev_latency_ms: 100,
       error: null,
       http_status: 200,
-      policy_version: "1",
+      policy_version: "2",
+      probabilities_json: JSON.stringify({
+        study_tech: 0.01,
+        study_exam: 0.01,
+        study_culture: 0.01,
+        ent_game: 0.01,
+        ent_variety: 0.94,
+        ent_music: 0.01,
+        ent_sports: 0.01,
+        info_news: 0.01,
+        useful_review: 0.01,
+        other_other: 0.01,
+      }),
     };
     const { db } = createMockDb({ total: 1 }, { results: [row] });
     const response = await worker.fetch(
-      new Request("https://guard.example/logs?limit=10&category=entertainment", {
+      new Request("https://guard.example/logs?limit=10&category=ent_variety", {
         headers: { Authorization: "Bearer client" },
       }),
       { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
@@ -498,9 +612,9 @@ describe("GET /logs", () => {
       logs: [
         expect.objectContaining({
           videoKey: "abc",
-          category: "entertainment",
+          category: "ent_variety",
           httpStatus: 200,
-          policyVersion: "1",
+          policyVersion: "2",
         }),
       ],
     });
@@ -509,7 +623,7 @@ describe("GET /logs", () => {
   it("filters logs by policy version", async () => {
     const { db, statements } = createMockDb({ total: 0 }, { results: [] });
     const response = await worker.fetch(
-      new Request("https://guard.example/logs?policyVersion=1", {
+      new Request("https://guard.example/logs?policyVersion=2", {
         headers: { Authorization: "Bearer client" },
       }),
       { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client", DB: db },
@@ -517,7 +631,7 @@ describe("GET /logs", () => {
 
     expect(response.status).toBe(200);
     expect(statements[0]?.sql).toContain("policy_version = ?");
-    expect(statements[0]?.params).toEqual(expect.arrayContaining(["1"]));
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["2"]));
   });
 });
 
@@ -781,7 +895,7 @@ describe("Response hardening", () => {
     expect(() =>
       normalizeJevResponse({
         answers: {
-          category: { choice: "study", probabilities: {}, confidence: Number.NaN },
+          category: { choice: "study_tech", probabilities: {}, confidence: Number.NaN },
         },
       }),
     ).toThrow("Invalid Jev confidence");
@@ -791,12 +905,23 @@ describe("Response hardening", () => {
     expect(
       normalizeJevResponse({
         answers: {
-          category: { choice: "study", probabilities: {}, confidence: 0.7 },
+          category: { choice: "study_tech", probabilities: {}, confidence: 0.7 },
         },
       }),
     ).toMatchObject({
-      category: "study",
-      probabilities: { study: 0, entertainment: 0, other: 0 },
+      category: "study_tech",
+      probabilities: {
+        study_tech: 0,
+        study_exam: 0,
+        study_culture: 0,
+        ent_game: 0,
+        ent_variety: 0,
+        ent_music: 0,
+        ent_sports: 0,
+        info_news: 0,
+        useful_review: 0,
+        other_other: 0,
+      },
     });
   });
 
@@ -860,12 +985,24 @@ describe("Response hardening", () => {
 describe("Classification cache", () => {
   const cachedRow = {
     video_key: "abc",
-    category: "study",
+    category: "study_tech",
     confidence: 0.9,
     prob_study: 0.9,
     prob_entertainment: 0.05,
     prob_other: 0.05,
-    policy_version: "1",
+    probabilities_json: JSON.stringify({
+      study_tech: 0.9,
+      study_exam: 0,
+      study_culture: 0,
+      ent_game: 0,
+      ent_variety: 0.05,
+      ent_music: 0,
+      ent_sports: 0,
+      info_news: 0,
+      useful_review: 0,
+      other_other: 0.05,
+    }),
+    policy_version: "2",
     updated_at: new Date().toISOString(),
   };
 
@@ -881,9 +1018,9 @@ describe("Classification cache", () => {
 
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toMatchObject({
-        category: "study",
+        category: "study_tech",
         confidence: 0.9,
-        policyVersion: "1",
+        policyVersion: "2",
         cached: true,
       });
       expect(fetcher).not.toHaveBeenCalled();
@@ -910,7 +1047,7 @@ describe("Classification cache", () => {
 
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toMatchObject({
-        category: "entertainment",
+        category: "ent_variety",
         cached: false,
       });
       expect(fetcher).toHaveBeenCalledTimes(1);
@@ -952,13 +1089,36 @@ describe("Classification cache", () => {
   it("writeClassificationCache upserts by video key", async () => {
     const { db, statements } = createMockDb();
     await writeClassificationCache(db, video, "abc", {
-      category: "study",
-      probabilities: { study: 0.9, entertainment: 0.05, other: 0.05 },
+      category: "study_tech",
+      probabilities: {
+        study_tech: 0.9,
+        study_exam: 0,
+        study_culture: 0,
+        ent_game: 0,
+        ent_variety: 0.05,
+        ent_music: 0,
+        ent_sports: 0,
+        info_news: 0,
+        useful_review: 0,
+        other_other: 0.05,
+      },
       confidence: 0.9,
+      probabilitiesJson: JSON.stringify({
+        study_tech: 0.9,
+        study_exam: 0,
+        study_culture: 0,
+        ent_game: 0,
+        ent_variety: 0.05,
+        ent_music: 0,
+        ent_sports: 0,
+        info_news: 0,
+        useful_review: 0,
+        other_other: 0.05,
+      }),
     });
 
     expect(statements[0]?.sql).toContain("INSERT INTO classification_cache");
     expect(statements[0]?.sql).toContain("ON CONFLICT(video_key)");
-    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study", 0.9, "1"]));
+    expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study_tech", 0.9, "2"]));
   });
 });

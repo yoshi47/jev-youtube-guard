@@ -15,9 +15,19 @@ const MAX_LOGS_LIMIT = 200;
 
 // Bump this whenever the classification criteria change. Cached results and
 // log rows are keyed by it so old judgments stay distinguishable.
-export const POLICY_VERSION = "1";
+export const POLICY_VERSION = "2";
 
-export type Category = "study" | "entertainment" | "other";
+export type Category =
+  | "study_tech"
+  | "study_exam"
+  | "study_culture"
+  | "ent_game"
+  | "ent_variety"
+  | "ent_music"
+  | "ent_sports"
+  | "info_news"
+  | "useful_review"
+  | "other_other";
 
 export interface Env {
   TYPESAFE_API_KEY: string;
@@ -37,6 +47,7 @@ export interface ClassificationResult {
   category: Category;
   probabilities: Record<Category, number>;
   confidence: number;
+  probabilitiesJson: string;
 }
 
 export interface ClassificationResponse extends ClassificationResult {
@@ -82,6 +93,7 @@ export interface ClassificationLogEntry {
   error: string | null;
   httpStatus: number;
   policyVersion: string;
+  probabilitiesJson: string | null;
 }
 
 export interface OverrideLogEntry {
@@ -141,9 +153,18 @@ export function buildJevRequest(video: VideoMetadata): JevRequest {
         type: "choice",
         instructions: "このコンテンツの主目的は何ですか？",
         criteria: {
-          study: "学習・教育・仕事・技術習得",
-          entertainment: "娯楽・暇つぶし",
-          other: "それ以外",
+          study_tech: "プログラミング・技術解説・仕事術・開発",
+          study_exam: "受験・資格勉強・語学学習",
+          study_culture:
+            "体系的な教養・科学・歴史・ドキュメンタリ・大学講義レベルの解説（雑学・トリビア・豆知識などの暇つぶしは除く）",
+          ent_game: "ゲーム実況・配信・eスポーツ・攻略",
+          ent_variety:
+            "バラエティ・お笑い・切り抜き・リアクション・ドラマ/アニメ・Vlog雑談・雑学・トリビア・豆知識",
+          ent_music: "音楽・MV・ライブ・歌ってみた・演奏",
+          ent_sports: "スポーツ観戦・ハイライト・実況",
+          info_news: "ニュース・時事・速報・政治・経済",
+          useful_review: "ガジェット・商品レビュー・HowTo・DIY・比較検証",
+          other_other: "上記のいずれにも当てはまらない",
         },
       },
     },
@@ -160,14 +181,24 @@ export function normalizeJevResponse(response: JevResponse): ClassificationResul
     throw new Error("Invalid Jev confidence");
   }
 
+  const probs = answer.probabilities ?? {};
+  const probabilities = {
+    study_tech: toProbability(probs.study_tech),
+    study_exam: toProbability(probs.study_exam),
+    study_culture: toProbability(probs.study_culture),
+    ent_game: toProbability(probs.ent_game),
+    ent_variety: toProbability(probs.ent_variety),
+    ent_music: toProbability(probs.ent_music),
+    ent_sports: toProbability(probs.ent_sports),
+    info_news: toProbability(probs.info_news),
+    useful_review: toProbability(probs.useful_review),
+    other_other: toProbability(probs.other_other),
+  };
   return {
     category: answer.choice,
-    probabilities: {
-      study: toProbability(answer.probabilities?.study),
-      entertainment: toProbability(answer.probabilities?.entertainment),
-      other: toProbability(answer.probabilities?.other),
-    },
+    probabilities,
     confidence: answer.confidence,
+    probabilitiesJson: JSON.stringify(probabilities),
   };
 }
 
@@ -221,8 +252,8 @@ export async function writeClassificationLog(
       `INSERT INTO classification_logs
         (created_at, video_key, url, title, channel, description_prefix, client_version,
          category, confidence, prob_study, prob_entertainment, prob_other,
-         jev_latency_ms, error, http_status, policy_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         jev_latency_ms, error, http_status, policy_version, probabilities_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       new Date().toISOString(),
@@ -241,6 +272,7 @@ export async function writeClassificationLog(
       entry.error,
       entry.httpStatus,
       entry.policyVersion,
+      entry.probabilitiesJson,
     )
     .run();
 }
@@ -295,6 +327,7 @@ interface ClassificationCacheRow {
   prob_other: number | null;
   policy_version: string;
   updated_at: string;
+  probabilities_json: string | null;
 }
 
 export async function readClassificationCache(
@@ -308,6 +341,7 @@ export async function readClassificationCache(
       .prepare(
         `SELECT video_key, category, confidence,
                 prob_study, prob_entertainment, prob_other,
+                probabilities_json,
                 policy_version, updated_at
            FROM classification_cache
           WHERE video_key = ?`,
@@ -328,14 +362,37 @@ export async function readClassificationCache(
   if (typeof row.confidence !== "number" || !Number.isFinite(row.confidence)) {
     return null;
   }
+  // Prefer probabilities_json if available (new format), fall back to legacy columns
+  let probabilities: Record<Category, number>;
+  if (row.probabilities_json) {
+    try {
+      probabilities = JSON.parse(row.probabilities_json);
+    } catch {
+      probabilities = buildLegacyProbabilities(row);
+    }
+  } else {
+    probabilities = buildLegacyProbabilities(row);
+  }
   return {
     category: row.category,
-    probabilities: {
-      study: toProbability(row.prob_study),
-      entertainment: toProbability(row.prob_entertainment),
-      other: toProbability(row.prob_other),
-    },
+    probabilities,
     confidence: row.confidence,
+    probabilitiesJson: row.probabilities_json ?? JSON.stringify(probabilities),
+  };
+}
+
+function buildLegacyProbabilities(row: ClassificationCacheRow): Record<Category, number> {
+  return {
+    study_tech: toProbability(row.prob_study),
+    study_exam: 0,
+    study_culture: 0,
+    ent_game: 0,
+    ent_variety: toProbability(row.prob_entertainment),
+    ent_music: 0,
+    ent_sports: 0,
+    info_news: 0,
+    useful_review: 0,
+    other_other: toProbability(row.prob_other),
   };
 }
 
@@ -352,8 +409,9 @@ export async function writeClassificationCache(
       `INSERT INTO classification_cache
          (video_key, url, title, channel, category, confidence,
           prob_study, prob_entertainment, prob_other,
+          probabilities_json,
           policy_version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(video_key) DO UPDATE SET
          url = excluded.url,
          title = excluded.title,
@@ -363,6 +421,7 @@ export async function writeClassificationCache(
          prob_study = excluded.prob_study,
          prob_entertainment = excluded.prob_entertainment,
          prob_other = excluded.prob_other,
+         probabilities_json = excluded.probabilities_json,
          policy_version = excluded.policy_version,
          updated_at = excluded.updated_at`,
     )
@@ -373,9 +432,10 @@ export async function writeClassificationCache(
       video.channel,
       result.category,
       result.confidence,
-      result.probabilities.study,
-      result.probabilities.entertainment,
-      result.probabilities.other,
+      result.probabilities.study_tech,
+      result.probabilities.ent_variety,
+      result.probabilities.other_other,
+      result.probabilitiesJson,
       POLICY_VERSION,
       now,
       now,
@@ -977,13 +1037,14 @@ function successEntry(
     clientVersion: video.clientVersion ?? "",
     category: result.category,
     confidence: result.confidence,
-    probStudy: result.probabilities.study,
-    probEntertainment: result.probabilities.entertainment,
-    probOther: result.probabilities.other,
+    probStudy: result.probabilities.study_tech,
+    probEntertainment: result.probabilities.ent_variety,
+    probOther: result.probabilities.other_other,
     jevLatencyMs,
     error: null,
     httpStatus: 200,
     policyVersion: POLICY_VERSION,
+    probabilitiesJson: result.probabilitiesJson,
   };
 }
 
@@ -1015,6 +1076,7 @@ async function logFailure(
     | "jevLatencyMs"
     | "category"
     | "policyVersion"
+    | "probabilitiesJson"
   > & {
     category?: string;
   },
@@ -1030,6 +1092,7 @@ async function logFailure(
       probOther: null,
       jevLatencyMs: null,
       policyVersion: POLICY_VERSION,
+      probabilitiesJson: null,
     });
   } catch (error) {
     console.error("jev_log_write_error", {
@@ -1037,7 +1100,6 @@ async function logFailure(
     });
   }
 }
-
 async function flushLog(promise: Promise<void>, ctx?: ExecutionContext): Promise<void> {
   if (ctx) {
     ctx.waitUntil(promise);
@@ -1053,7 +1115,18 @@ function clampInt(raw: string | null, fallback: number, min: number, max: number
 }
 
 function isCategory(value: string): value is Category {
-  return value === "study" || value === "entertainment" || value === "other";
+  return (
+    value === "study_tech" ||
+    value === "study_exam" ||
+    value === "study_culture" ||
+    value === "ent_game" ||
+    value === "ent_variety" ||
+    value === "ent_music" ||
+    value === "ent_sports" ||
+    value === "info_news" ||
+    value === "useful_review" ||
+    value === "other_other"
+  );
 }
 
 async function parseVideoMetadata(request: Request): Promise<VideoMetadata> {

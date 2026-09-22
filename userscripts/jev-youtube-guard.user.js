@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.8.2
+// @version      0.9.0
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
@@ -11,13 +11,16 @@
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.8.2";
+  const SCRIPT_VERSION = "0.9.0";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
     feedbackEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/feedback",
     clientToken: "YOUR_CLIENT_TOKEN",
     confidenceThreshold: 0.6,
+    // Categories that should be blocked when confidence >= threshold.
+    // Edit this list to customize blocking behavior per category.
+    blockedCategories: ["ent_game", "ent_variety", "ent_sports", "useful_review"],
   };
 
   const OVERRIDE_PREFIX = "jev-youtube-guard:allow:";
@@ -26,7 +29,7 @@
   const CLASSIFICATION_TIMEOUT_MS = 10_000;
   const OVERLAY_ID = "jev-youtube-guard-overlay";
   // Must match the Worker's POLICY_VERSION. Bump together when criteria change.
-  const POLICY_VERSION = "1";
+  const POLICY_VERSION = "2";
   const DEBUG_PANEL_ID = "jev-youtube-guard-debug";
   const FEEDBACK_BUTTON_ID = "jev-youtube-guard-feedback";
   const FEEDBACK_FLOAT_ID = "jev-youtube-guard-feedback-float";
@@ -1005,6 +1008,10 @@
   }
 
   function shouldBlock(result) {
-    return result?.category === "entertainment" && result.confidence >= CONFIG.confidenceThreshold;
+    if (!result) return false;
+    return (
+      CONFIG.blockedCategories.includes(result.category) &&
+      result.confidence >= CONFIG.confidenceThreshold
+    );
   }
 })();
