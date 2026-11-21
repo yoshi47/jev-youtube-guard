@@ -26,10 +26,10 @@ iPhone Safari Userscript
 git clone https://github.com/yoshi47/jev-youtube-guard.git
 cd jev-youtube-guard
 pnpm install
-pnpm setup
+pnpm run setup
 ```
 
-`pnpm setup` は対話式に以下を全部やります。
+`pnpm run setup` は対話式に以下を全部やります。
 
 1. `wrangler login` 済みか確認 (未ログインなら先に `npx wrangler login`)
 2. D1 `jev-youtube-guard-logs` を作成 (同名DBがあれば再利用) し、`wrangler.jsonc` の `database_id` を更新
@@ -41,7 +41,7 @@ pnpm setup
 非対話で実行する場合 (CIや再実行向け):
 
 ```sh
-TYPESAFE_API_KEY=... CLIENT_TOKEN=... WORKER_URL=... pnpm setup -- --non-interactive
+TYPESAFE_API_KEY=... CLIENT_TOKEN=... WORKER_URL=... pnpm run setup -- --non-interactive
 ```
 
 `CLIENT_TOKEN` 省略時は自動生成、`WORKER_URL` 省略時はデプロイ出力から推測します。
@@ -50,7 +50,7 @@ TYPESAFE_API_KEY=... CLIENT_TOKEN=... WORKER_URL=... pnpm setup -- --non-interac
 
 ## 手動でセットアップする場合
 
-`pnpm setup` と同じことを手でやる手順です。
+`pnpm run setup` と同じことを手でやる手順です。
 
 ```sh
 npx wrangler login
@@ -76,7 +76,7 @@ clientToken: "YOUR_CLIENT_TOKEN",
 
 ## 個人設定の扱い
 
-`wrangler.jsonc` の `database_id` と、userscriptの `endpoint` 3つ・`clientToken` はあなた個人の設定です。`pnpm setup` が自動で書き換えますが、publicリポジトリにはコミットしないでください。
+`wrangler.jsonc` の `database_id` と、userscriptの `endpoint` 3つ・`clientToken` はあなた個人の設定です。`pnpm run setup` が自動で書き換えますが、publicリポジトリにはコミットしないでください。
 
 ## ローカル検証
 
@@ -91,7 +91,7 @@ pnpm build
 
 ## 判定ログ
 
-`/classify` への認証済みリクエストは全件、D1(`jev-youtube-guard-logs` / `classification_logs`)に記録されます。D1の作成とマイグレーションは `pnpm setup` が済ませているので、ここでは見る方法だけ説明します。成功だけでなく、Jevエラーや不正リクエスト(400/502)も残ります。保存内容は `videoKey, url, title, channel, description先頭500字, clientVersion, category, confidence, 確率3種, Jevレイテンシ, error, httpStatus` です。
+`/classify` への認証済みリクエストは全件、D1(`jev-youtube-guard-logs` / `classification_logs`)に記録されます。D1の作成とマイグレーションは `pnpm run setup` が済ませているので、ここでは見る方法だけ説明します。成功だけでなく、Jevエラーや不正リクエスト(400/502)も残ります。保存内容は `videoKey, url, title, channel, description先頭500字, clientVersion, category, confidence, 確率（probabilities_json）, policy_version, Jevレイテンシ, error, httpStatus` です。
 
 後から見るには、Userscriptと同じ `CLIENT_TOKEN` で `GET /logs` を叩きます。
 

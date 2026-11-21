@@ -11,7 +11,7 @@
  *   6. userscript の endpoint / clientToken を書き換え
  *
  * 非対話モード:
- *   TYPESAFE_API_KEY=... CLIENT_TOKEN=... WORKER_URL=... pnpm setup -- --non-interactive
+ *   TYPESAFE_API_KEY=... CLIENT_TOKEN=... WORKER_URL=... pnpm run setup -- --non-interactive
  *   (CLIENT_TOKEN 省略時は自動生成、WORKER_URL 省略時は deploy 出力から推測)
  */
 import { spawnSync } from "node:child_process";
@@ -34,8 +34,8 @@ const WORKER_URL_RE = /https:\/\/[^\s"'`]+\.workers\.dev/;
 const args = new Set(process.argv.slice(2));
 if (args.has("--help") || args.has("-h")) {
   console.log(`使い方:
-  pnpm setup
-  pnpm setup -- --non-interactive   # 環境変数 TYPESAFE_API_KEY / CLIENT_TOKEN / WORKER_URL から読む
+  pnpm run setup
+  pnpm run setup -- --non-interactive   # 環境変数 TYPESAFE_API_KEY / CLIENT_TOKEN / WORKER_URL から読む
 `);
   process.exit(0);
 }
