@@ -17,6 +17,14 @@ const MAX_LOGS_LIMIT = 200;
 // log rows are keyed by it so old judgments stay distinguishable.
 export const POLICY_VERSION = "2";
 
+// Latest userscript version. Bump together with the userscript's
+// SCRIPT_VERSION. /classify echoes this so old clients can warn about
+// missed updates (multi-browser usage). MIN_CLIENT_VERSION is the oldest
+// client that still blocks correctly; older ones get clientUpdateRequired.
+// (0.9.0 blocks fine, 0.9.1 only adds the update banner itself.)
+export const LATEST_CLIENT_VERSION = "0.9.1";
+export const MIN_CLIENT_VERSION = "0.9.0";
+
 export type Category =
   | "study_tech"
   | "study_exam"
@@ -53,6 +61,8 @@ export interface ClassificationResult {
 export interface ClassificationResponse extends ClassificationResult {
   policyVersion: string;
   cached: boolean;
+  latestClientVersion: string;
+  clientUpdateRequired: boolean;
 }
 
 export interface JevResponse {
@@ -142,6 +152,32 @@ function corsHeadersFor(request: Request): Record<string, string> {
 
 export function isAuthorized(authorization: string | undefined, clientToken: string): boolean {
   return authorization === `Bearer ${clientToken}`;
+}
+
+// Compare dotted versions ("0.9.0" > "0.8.2"). Non-semver strings
+// ("manual-test", "", undefined) return NaN and are treated as unknown
+// (never force an update banner for them).
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string): [number, number, number] | null => {
+    const m = v.trim().match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return Number.NaN;
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] as number;
+    const y = pb[i] as number;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+export function isClientOutdated(clientVersion: string | undefined): boolean {
+  if (!clientVersion) return true;
+  const cmp = compareVersions(clientVersion, MIN_CLIENT_VERSION);
+  if (Number.isNaN(cmp)) return false;
+  return cmp < 0;
 }
 
 export function buildJevRequest(video: VideoMetadata): JevRequest {
@@ -479,6 +515,20 @@ export default {
       return handleGetFeedback(request, env);
     }
 
+    if (request.method === "GET" && url.pathname === "/version") {
+      // Public: no auth so old clients can check without a token round-trip.
+      // Lets each browser self-report "更新が必要です".
+      return json(
+        {
+          policyVersion: POLICY_VERSION,
+          latestClientVersion: LATEST_CLIENT_VERSION,
+          minClientVersion: MIN_CLIENT_VERSION,
+        },
+        200,
+        request,
+      );
+    }
+
     if (request.method !== "POST" || url.pathname !== "/classify") {
       return json({ error: "Not found" }, 404, request);
     }
@@ -546,6 +596,8 @@ async function handleClassify(
         ...cached,
         policyVersion: POLICY_VERSION,
         cached: true,
+        latestClientVersion: LATEST_CLIENT_VERSION,
+        clientUpdateRequired: isClientOutdated(video.clientVersion),
       };
       console.log("jev_classification", {
         videoKey,
@@ -568,6 +620,8 @@ async function handleClassify(
       ...result,
       policyVersion: POLICY_VERSION,
       cached: false,
+      latestClientVersion: LATEST_CLIENT_VERSION,
+      clientUpdateRequired: isClientOutdated(video.clientVersion),
     };
     console.log("jev_classification", {
       videoKey,

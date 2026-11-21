@@ -1,17 +1,19 @@
 // ==UserScript==
 // @name         Jev YouTube Guard
 // @namespace    https://github.com/yoshi47/jev-youtube-guard
-// @version      0.9.0
+// @version      0.9.1
 // @description  Block high-confidence entertainment videos using TypeSafe Jev.
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @match        https://m.youtube.com/*
 // @run-at       document-start
 // @grant        none
+// @downloadURL  https://raw.githubusercontent.com/yoshi47/jev-youtube-guard/main/userscripts/jev-youtube-guard.user.js
+// @updateURL    https://raw.githubusercontent.com/yoshi47/jev-youtube-guard/main/userscripts/jev-youtube-guard.user.js
 // ==/UserScript==
 
 (() => {
-  const SCRIPT_VERSION = "0.9.0";
+  const SCRIPT_VERSION = "0.9.1";
   const CONFIG = {
     endpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/classify",
     allowEndpoint: "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/allow",
@@ -37,6 +39,22 @@
   // Temporary: force the debug panel on for every video until the issue is resolved.
   // Set back to false to restore opt-in (&jevdebug=1) behavior.
   const DEBUG_FORCE_ON = false;
+  // All categories the current Worker can return. An unknown category means
+  // the Worker moved ahead (new POLICY_VERSION) while this browser still runs
+  // an old script that can no longer block correctly.
+  const KNOWN_CATEGORIES = [
+    "study_tech",
+    "study_exam",
+    "study_culture",
+    "ent_game",
+    "ent_variety",
+    "ent_music",
+    "ent_sports",
+    "info_news",
+    "useful_review",
+    "other_other",
+  ];
+  const UPDATE_BANNER_ID = "jev-youtube-guard-update";
   const policy = {
     isTargetPage,
     shouldBlock,
@@ -79,6 +97,7 @@
     installGlobalErrorTrap();
     if (debugMode) installDebugPanel();
     dbg(`init url=${location.href}`);
+    checkVersionInBackground();
     await evaluateCurrentVideo();
 
     document.addEventListener("yt-navigate-finish", () => {
@@ -213,6 +232,7 @@
       dbg(
         `result category=${result.category} confidence=${result.confidence} (${Date.now() - classifyStartedAt}ms, total ${Date.now() - cacheStartedAt}ms)`,
       );
+      checkForClientUpdate(result);
       const resultMetadata = {
         videoKey,
         url: metadata.url,
@@ -1013,5 +1033,108 @@
       CONFIG.blockedCategories.includes(result.category) &&
       result.confidence >= CONFIG.confidenceThreshold
     );
+  }
+
+  // Multi-browser update detection: the Worker tells us when this browser's
+  // script is too old to block correctly. Show a persistent banner instead of
+  // silently allowing everything (e.g. old "entertainment" check vs new
+  // "ent_game" categories).
+  function checkForClientUpdate(result) {
+    if (!result || typeof result !== "object") return;
+    const serverPolicy = typeof result.policyVersion === "string" ? result.policyVersion : "";
+    const latest = typeof result.latestClientVersion === "string" ? result.latestClientVersion : "";
+    const unknownCategory =
+      typeof result.category === "string" && !KNOWN_CATEGORIES.includes(result.category);
+    const policyMismatch = serverPolicy !== "" && serverPolicy !== POLICY_VERSION;
+    if (result.clientUpdateRequired === true || policyMismatch || unknownCategory) {
+      const detail = unknownCategory
+        ? `unknown category=${result.category}`
+        : `policy ${POLICY_VERSION} -> ${serverPolicy || "?"}`;
+      dbg(
+        `UPDATE REQUIRED: script v${SCRIPT_VERSION} is outdated (latest=${latest || "?"} ${detail})`,
+      );
+      showUpdateBanner(latest);
+    }
+  }
+
+  function versionEndpoint() {
+    try {
+      return new URL("/version", CONFIG.endpoint).toString();
+    } catch {
+      return "";
+    }
+  }
+
+  // Cache hits never contact /classify, so a stale browser could stay silent
+  // forever. One lightweight GET /version per page fixes that.
+  function checkVersionInBackground() {
+    const url = versionEndpoint();
+    if (!url) return;
+    fetch(url)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((info) => {
+        if (!info || typeof info !== "object") return;
+        checkForClientUpdate({
+          policyVersion: info.policyVersion,
+          latestClientVersion: info.latestClientVersion,
+          clientUpdateRequired:
+            typeof info.latestClientVersion === "string" &&
+            typeof SCRIPT_VERSION === "string" &&
+            info.latestClientVersion !== SCRIPT_VERSION &&
+            compareClientVersions(SCRIPT_VERSION, info.latestClientVersion) < 0,
+          category: undefined,
+        });
+      })
+      .catch(() => {});
+  }
+
+  function compareClientVersions(a, b) {
+    const parse = (v) => {
+      const m = String(v)
+        .trim()
+        .match(/^(\d+)\.(\d+)\.(\d+)$/);
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    };
+    const pa = parse(a);
+    const pb = parse(b);
+    if (!pa || !pb) return Number.NaN;
+    for (let i = 0; i < 3; i++) {
+      if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+    }
+    return 0;
+  }
+
+  function showUpdateBanner(latest) {
+    if (document.getElementById(UPDATE_BANNER_ID)) return;
+    const banner = document.createElement("div");
+    banner.id = UPDATE_BANNER_ID;
+    banner.style.cssText = [
+      "position: fixed",
+      "top: 8px",
+      "right: 8px",
+      "z-index: 2147483647",
+      "max-width: 92vw",
+      "padding: 10px 12px",
+      "border: 1px solid #b00",
+      "border-radius: 10px",
+      "background: rgba(255, 240, 240, 0.97)",
+      "color: #900",
+      "font: 12px -apple-system, BlinkMacSystemFont, sans-serif",
+      "line-height: 1.5",
+      "box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2)",
+      "pointer-events: auto",
+    ].join(";");
+    const text = document.createElement("span");
+    text.textContent =
+      `Jev Guard 更新が必要です (v${SCRIPT_VERSION} → v${latest || "?"}). ` +
+      "このブラウザは古いためブロックできません。全ブラウザで更新してください。";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "✕";
+    close.style.cssText = "margin-left: 8px; padding: 2px 6px; cursor: pointer;";
+    close.addEventListener("click", () => banner.remove());
+    banner.appendChild(text);
+    banner.appendChild(close);
+    document.documentElement.appendChild(banner);
   }
 })();

@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildJevRequest,
   classifyVideo,
+  compareVersions,
   getVideoKey,
   isAuthorized,
+  isClientOutdated,
+  LATEST_CLIENT_VERSION,
+  MIN_CLIENT_VERSION,
   normalizeJevResponse,
+  POLICY_VERSION,
   readClassificationCache,
   toLogDescriptionPrefix,
   writeClassificationCache,
@@ -1120,5 +1125,64 @@ describe("Classification cache", () => {
     expect(statements[0]?.sql).toContain("INSERT INTO classification_cache");
     expect(statements[0]?.sql).toContain("ON CONFLICT(video_key)");
     expect(statements[0]?.params).toEqual(expect.arrayContaining(["abc", "study_tech", 0.9, "2"]));
+  });
+});
+
+describe("Client version detection", () => {
+  it("compares dotted versions", () => {
+    expect(compareVersions("0.9.1", "0.9.1")).toBe(0);
+    expect(compareVersions("0.8.2", "0.9.1")).toBe(-1);
+    expect(compareVersions("0.10.0", "0.9.1")).toBe(1);
+    expect(compareVersions("manual-test", "0.9.1")).toBeNaN();
+    expect(compareVersions("", "0.9.1")).toBeNaN();
+  });
+
+  it("flags clients older than MIN_CLIENT_VERSION", () => {
+    expect(isClientOutdated("0.8.2")).toBe(true);
+    expect(isClientOutdated("0.9.0")).toBe(false);
+    expect(isClientOutdated(MIN_CLIENT_VERSION)).toBe(false);
+    expect(isClientOutdated(LATEST_CLIENT_VERSION)).toBe(false);
+    expect(isClientOutdated("manual-test")).toBe(false);
+    expect(isClientOutdated(undefined)).toBe(true);
+  });
+
+  it("exposes versions on GET /version without auth", async () => {
+    const response = await worker.fetch(new Request("https://guard.example/version"), {
+      TYPESAFE_API_KEY: "jev-key",
+      CLIENT_TOKEN: "client",
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      policyVersion: POLICY_VERSION,
+      latestClientVersion: LATEST_CLIENT_VERSION,
+      minClientVersion: MIN_CLIENT_VERSION,
+    });
+  });
+
+  it("marks outdated clients in /classify responses", async () => {
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => jevSuccessResponse());
+    try {
+      const oldClient = await worker.fetch(classifyRequest({ ...video, clientVersion: "0.8.2" }), {
+        TYPESAFE_API_KEY: "jev-key",
+        CLIENT_TOKEN: "client",
+      });
+      await expect(oldClient.json()).resolves.toMatchObject({
+        policyVersion: "2",
+        latestClientVersion: LATEST_CLIENT_VERSION,
+        clientUpdateRequired: true,
+      });
+
+      const newClient = await worker.fetch(
+        classifyRequest({ ...video, clientVersion: LATEST_CLIENT_VERSION }),
+        { TYPESAFE_API_KEY: "jev-key", CLIENT_TOKEN: "client" },
+      );
+      await expect(newClient.json()).resolves.toMatchObject({
+        clientUpdateRequired: false,
+      });
+    } finally {
+      fetcher.mockRestore();
+    }
   });
 });

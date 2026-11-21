@@ -104,7 +104,26 @@ curl -H "Authorization: Bearer $CLIENT_TOKEN" \
 
 ## 分類ポリシーのバージョン
 
-判定基準を変えるときは、Workerの `POLICY_VERSION` とUserscriptの `POLICY_VERSION` を一緒に上げ、Userscriptのバージョンも上げます(現在はどちらも `"1"`)。応答・D1・キャッシュがすべてこの値でキー付けされるので、基準変更前の判定と混ざりません。古いキャッシュは自動で再判定になります。
+判定基準を変えるときは、Workerの `POLICY_VERSION` とUserscriptの `POLICY_VERSION` を一緒に上げ、Userscriptのバージョンも上げます(現在はポリシー `"2"`・スクリプト `0.9.1`)。応答・D1・キャッシュがすべてこの値でキー付けされるので、基準変更前の判定と混ざりません。古いキャッシュは自動で再判定になります。
+
+## 更新漏れの検出 (複数ブラウザ用)
+
+複数ブラウザで使うと更新し忘れが出ます。2つの仕組みでわかるようにしています。
+
+1. **画面バナー (Userscript 0.9.1以降)**: 古いブラウザでYouTubeを開くと右上に赤い「Jev Guard 更新が必要です (vX → vY)」バナーが出ます。`/classify` の `clientUpdateRequired` / `policyVersion` 不一致 / 未知 `category` のいずれかで表示します。キャッシュヒット時も `GET /version` で裏取りするので見逃しません。Tampermonkey系の自動更新向けに `@downloadURL` / `@updateURL` も付けています。
+2. **ログ集計**: どのブラウザが古いかは `/logs` の `clientVersion` で分かります。一発集計用に `pnpm check-versions` を用意しています。更新が必要なクライアントがあれば終了コード1になります。
+
+```sh
+CLIENT_TOKEN=... WORKER_URL=https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev pnpm check-versions
+# --limit=100 --latest=0.9.1 --no-fail も指定可
+```
+
+バージョン確認だけなら認証不要の `GET /version` もあります:
+
+```sh
+curl "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/version" | jq .
+# {"policyVersion":"2","latestClientVersion":"0.9.1","minClientVersion":"0.9.1"}
+```
 
 「この動画だけ表示する」を押した解除操作は `POST /allow` で `override_logs` に記録されます。Userscript(0.3.0以降)が自動で送るので手動操作は不要です。一覧は `GET /overrides`(`limit/offset/videoKey/q` 対応)で見られます。
 
